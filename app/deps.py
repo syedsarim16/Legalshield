@@ -25,6 +25,8 @@ def get_optional_user(
             user = db.get(User, identity.user_id)
     if user is None:
         raise ApiError(401, "TOKEN_INVALID", "Account no longer exists.")
+    if user.email and (not user.email_verified or not claims.get("email_verified")):
+        raise ApiError(403, "EMAIL_NOT_VERIFIED", "Verify your email address before signing in.")
     return user
 
 

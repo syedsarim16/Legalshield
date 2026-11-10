@@ -10,6 +10,8 @@ def purge_user(db, user: User) -> None:
     for model in (EmergencyContact, Device, PasswordResetGrant, RefreshToken):
         db.execute(delete(model).where(model.user_id == uid))
     db.execute(delete(OtpCode).where((OtpCode.user_id == uid) | (OtpCode.phone == user.phone)))
+    if user.email:
+        db.execute(delete(OtpCode).where(OtpCode.email == user.email))
     db.execute(delete(LawyerProfile).where(LawyerProfile.user_id == uid))
     db.execute(delete(NgoProfile).where(NgoProfile.user_id == uid))
     identity = db.scalar(select(FirebaseIdentity).where(FirebaseIdentity.user_id == uid))

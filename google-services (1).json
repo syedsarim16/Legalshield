@@ -12,7 +12,12 @@
           "package_name": "com.company.legalshield"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "767134186399-6sboba2d5ulbs8mmeac2gbd7vvfttoq6.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyB9e1QkSYs5ylePgOAWv4EnAQnJC9ZOvm8"
@@ -20,7 +25,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "767134186399-6sboba2d5ulbs8mmeac2gbd7vvfttoq6.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

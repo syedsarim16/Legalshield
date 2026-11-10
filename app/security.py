@@ -58,5 +58,5 @@ def generate_otp() -> str:
     return f"{secrets.randbelow(10**6):06d}"
 
 
-def hash_otp(code: str, phone: str) -> str:
-    return hmac.new(settings.jwt_secret.encode(), f"{phone}:{code}".encode(), hashlib.sha256).hexdigest()
+def hash_otp(code: str, identifier: str) -> str:
+    return hmac.new(settings.jwt_secret.encode(), f"{identifier}:{code}".encode(), hashlib.sha256).hexdigest()

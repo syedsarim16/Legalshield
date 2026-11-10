@@ -11,11 +11,19 @@ class Settings(BaseSettings):
     refresh_token_days: int = 7
 
     # OTP
-    otp_minutes: int = 1
+    otp_minutes: int = 5
     otp_max_attempts: int = 5
     otp_rate_limit: int = 3
     otp_rate_window_minutes: int = 10
-    debug_return_otp: bool = False  # DEV ONLY: returns the OTP in the API response
+
+    # Email delivery
+    email_smtp_host: str = ""
+    email_smtp_port: int = 587
+    email_smtp_username: str = ""
+    email_smtp_password: str = ""
+    email_from_address: str = ""
+    email_smtp_starttls: bool = True
+    email_smtp_ssl: bool = False
 
     # Rate limits
     chat_rate_limit_per_hour: int = 30

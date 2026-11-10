@@ -59,6 +59,13 @@ def normalize_phone(raw: str) -> str:
     return "+92" + rest
 
 
+def normalize_email(raw: str) -> str:
+    email = (raw or "").strip().lower()
+    if len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ApiError(422, "INVALID_EMAIL", "Enter a valid email address.")
+    return email
+
+
 def validate_password(pw: str) -> str:
     if len(pw) < 8 or len(pw.encode()) > 72:
         raise ApiError(422, "WEAK_PASSWORD", "Password must be 8 to 72 characters.")

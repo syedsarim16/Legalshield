@@ -10,14 +10,22 @@ from ..config import settings
 from ..db import get_db, select, update
 from ..deps import get_optional_user
 from ..errors import ApiError
-from ..firebase import delete_document, revoke_firebase_user, verify_id_token, upload_document
-from ..models import FirebaseIdentity, LawyerProfile, NgoProfile, PasswordResetGrant, RefreshToken, User
+from ..firebase import (
+    create_email_user,
+    delete_auth_user,
+    delete_document,
+    revoke_firebase_user,
+    set_email_password,
+    verify_id_token,
+    upload_document,
+)
+from ..models import FirebaseIdentity, LawyerProfile, NgoProfile, OtpCode, PasswordResetGrant, RefreshToken, User
 from ..ratelimit import RateLimiter
 from ..security import hash_password, hash_token, verify_password
 from ..services.accounts import purge_user
 from ..services.otp import issue_otp, verify_otp
 from ..services.tokens import issue_token_pair
-from ..utils import new_id, normalize_phone, utcnow, validate_cnic, validate_password
+from ..utils import new_id, normalize_email, normalize_phone, utcnow, validate_cnic, validate_password
 
 router = APIRouter(prefix="/auth", tags=["M1 Auth"])
 
@@ -60,6 +68,7 @@ def register(
     role: str = Form(...),
     full_name: str = Form(..., min_length=2, max_length=120),
     phone: str = Form(...),
+    email: str = Form(...),
     password: str = Form(...),
     cnic: Optional[str] = Form(None),
     bar_council_no: Optional[str] = Form(None),
@@ -73,6 +82,7 @@ def register(
     if role not in SELF_REGISTER_ROLES:
         raise ApiError(422, "INVALID_ROLE", "Role must be citizen, lawyer or ngo_monitor.")
     phone_n = normalize_phone(phone)
+    email_n = normalize_email(email)
     validate_password(password)
     cnic_n = validate_cnic(cnic) if cnic else None
     if role == "lawyer" and not (bar_council_no and bar_council_no.strip()):
@@ -82,18 +92,25 @@ def register(
     if role in ("lawyer", "ngo_monitor") and (verification_document is None or not verification_document.filename):
         raise ApiError(422, "DOCUMENT_REQUIRED", "Upload your licence or proof document.")
 
-    existing = db.scalar(select(User).where(User.phone == phone_n))
-    if existing is not None:
-        if existing.phone_verified:
+    existing_phone = db.scalar(select(User).where(User.phone == phone_n))
+    existing_email = db.scalar(select(User).where(User.email == email_n))
+    if existing_email is not None and (
+        existing_email.email_verified or existing_email.id != getattr(existing_phone, "id", None)
+    ):
+        raise ApiError(409, "EMAIL_IN_USE", "This email address is already registered.")
+    if existing_phone is not None:
+        if existing_phone.phone_verified or existing_phone.email_verified:
             raise ApiError(409, "PHONE_IN_USE", "This phone number is already registered.")
-        purge_user(db, existing)  # abandoned, never-verified signup: let the owner start over
+        purge_user(db, existing_phone)
 
     doc_key = _save_document(verification_document) if role != "citizen" and verification_document else None
+    firebase_user_created = False
     try:
         user = User(
             role=role,
             full_name=full_name.strip(),
             phone=phone_n,
+            email=email_n,
             cnic=cnic_n,
             password_hash=hash_password(password),
             verification_status="pending" if role in ("lawyer", "ngo_monitor") else "not_required",
@@ -105,17 +122,24 @@ def register(
             db.add(LawyerProfile(user_id=user.id, bar_council_no=bar_council_no.strip(), contact_phone=phone_n))
         elif role == "ngo_monitor":
             db.add(NgoProfile(user_id=user.id, organisation_name=organisation_name.strip(), districts=_split(districts)))
+        create_email_user(user.id, email_n, password, user.full_name)
+        firebase_user_created = True
+        db.add(FirebaseIdentity(firebase_uid=user.id, user_id=user.id, provider="password"))
         db.commit()
-        code = issue_otp(db, phone_n, "register", user.id)
     except Exception:
         db.rollback()
+        if firebase_user_created:
+            delete_auth_user(user.id)
         if doc_key:
             delete_document(doc_key)
         raise
-    body = {"user_id": user.id, "role": user.role, "verification_status": user.verification_status, "otp_sent": True}
-    if settings.debug_return_otp:
-        body["dev_otp"] = code
-    return body
+    return {
+        "user_id": user.id,
+        "role": user.role,
+        "verification_status": user.verification_status,
+        "email": email_n,
+        "verification_required": True,
+    }
 
 
 def _firebase_identity(claims: dict) -> tuple[str, str]:
@@ -154,6 +178,42 @@ class FirebaseExchange(BaseModel):
     id_token: str = Field(min_length=20)
 
 
+class FirebaseEmailExchange(FirebaseExchange):
+    password: Optional[str] = Field(None, min_length=8, max_length=72)
+
+
+@router.post("/firebase/email/exchange")
+def firebase_email_exchange(body: FirebaseEmailExchange, db=Depends(get_db)):
+    claims = verify_id_token(body.id_token)
+    if not claims.get("email_verified") or not claims.get("email"):
+        raise ApiError(403, "EMAIL_NOT_VERIFIED", "Verify your email address before signing in.")
+    email = normalize_email(str(claims["email"]))
+    uid = str(claims.get("uid") or claims.get("sub") or "").strip()
+    if not uid:
+        raise ApiError(401, "FIREBASE_TOKEN_INVALID", "Firebase sign-in could not be verified.")
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None:
+        raise ApiError(404, "ACCOUNT_NOT_FOUND", "Create a LegalShield account first.")
+    identity = db.get(FirebaseIdentity, uid)
+    if identity is not None and identity.user_id != user.id:
+        raise ApiError(409, "FIREBASE_ACCOUNT_EXISTS", "This Firebase account is linked to another LegalShield account.")
+    if uid != user.id and identity is None:
+        db.add(
+            FirebaseIdentity(
+                firebase_uid=uid,
+                user_id=user.id,
+                provider=str(claims.get("firebase", {}).get("sign_in_provider", "password")),
+            )
+        )
+    if body.password and not verify_password(body.password, user.password_hash):
+        user.password_hash = hash_password(body.password)
+        db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id).values(revoked=True))
+    user.email_verified = True
+    db.commit()
+    session = issue_token_pair(db, user, include_firebase_custom_token=False)
+    return {**session, "role": user.role, "verification_status": user.verification_status}
+
+
 @router.post("/firebase/exchange")
 def firebase_exchange(body: FirebaseExchange, db=Depends(get_db)):
     """Exchange a verified Firebase Auth phone session for a LegalShield session."""
@@ -164,6 +224,8 @@ def firebase_exchange(body: FirebaseExchange, db=Depends(get_db)):
         raise ApiError(404, "ACCOUNT_NOT_FOUND", "Create a LegalShield account first.")
     if user.phone != phone:
         raise ApiError(409, "PHONE_MISMATCH", "This Firebase phone does not match the LegalShield account.")
+    if user.email and not user.email_verified:
+        raise ApiError(403, "EMAIL_NOT_VERIFIED", "Verify your email address first.")
     if identity is None:
         db.add(FirebaseIdentity(firebase_uid=uid, user_id=user.id, provider="phone"))
     user.phone_verified = True
@@ -176,6 +238,7 @@ def firebase_register(
     id_token: str = Form(...),
     role: str = Form(...),
     full_name: str = Form(..., min_length=2, max_length=120),
+    email: str = Form(...),
     password: str = Form(..., min_length=8, max_length=72),
     cnic: Optional[str] = Form(None),
     bar_council_no: Optional[str] = Form(None),
@@ -186,12 +249,15 @@ def firebase_register(
 ):
     """Create a LegalShield account after Firebase has verified the phone OTP."""
     uid, phone = _firebase_identity(verify_id_token(id_token))
+    email_n = normalize_email(email)
     validate_password(password)
     cnic_n, districts_n = _validate_firebase_registration(
         role, cnic, bar_council_no, organisation_name, districts, verification_document
     )
     if db.get(FirebaseIdentity, uid) is not None:
         raise ApiError(409, "FIREBASE_ACCOUNT_EXISTS", "This Firebase account is already linked to LegalShield.")
+    if db.scalar(select(User).where(User.email == email_n)):
+        raise ApiError(409, "EMAIL_IN_USE", "This email address is already registered.")
     existing = db.scalar(select(User).where(User.phone == phone))
     if existing is not None:
         if existing.phone_verified:
@@ -204,6 +270,7 @@ def firebase_register(
             role=role,
             full_name=full_name.strip(),
             phone=phone,
+            email=email_n,
             cnic=cnic_n,
             # Firebase owns the phone factor, while the chosen password keeps
             # the existing password-login fallback available.
@@ -218,6 +285,7 @@ def firebase_register(
             db.add(LawyerProfile(user_id=user.id, bar_council_no=bar_council_no.strip(), contact_phone=phone))
         elif role == "ngo_monitor":
             db.add(NgoProfile(user_id=user.id, organisation_name=organisation_name.strip(), districts=districts_n))
+        create_email_user(user.id, email_n, password, user.full_name)
         db.add(FirebaseIdentity(firebase_uid=uid, user_id=user.id, provider="phone"))
         db.commit()
     except Exception:
@@ -225,114 +293,115 @@ def firebase_register(
         if doc_key:
             delete_document(doc_key)
         raise
-    return {**issue_token_pair(db, user), "user_id": user.id, "role": user.role, "verification_status": user.verification_status}
+    return {
+        "user_id": user.id,
+        "role": user.role,
+        "verification_status": user.verification_status,
+        "email": email_n,
+        "verification_required": True,
+    }
 
 
 class OtpRequest(BaseModel):
-    purpose: Literal["register", "reset", "change_phone"]
-    phone: Optional[str] = None
+    purpose: Literal["reset", "change_phone"]
+    email: Optional[str] = None
     new_phone: Optional[str] = None
     current_password: Optional[str] = None
 
 
 @router.post("/otp/request")  # E-02
 def otp_request(body: OtpRequest, db=Depends(get_db), me: User | None = Depends(get_optional_user)):
-    code = None
     if body.purpose == "change_phone":
         if me is None:
             raise ApiError(401, "UNAUTHENTICATED", "Sign in required.")
         if not body.new_phone or not body.current_password:
             raise ApiError(422, "VALIDATION_ERROR", "new_phone and current_password are required.")
+        if not me.email:
+            raise ApiError(409, "EMAIL_REQUIRED", "Add an email address before changing your phone number.")
         if not verify_password(body.current_password, me.password_hash):
             raise ApiError(401, "INVALID_CREDENTIALS", "Current password is incorrect.")
         new_phone = normalize_phone(body.new_phone)
         if db.scalar(select(User).where(User.phone == new_phone)):
             raise ApiError(409, "PHONE_IN_USE", "This phone number is already registered.")
-        code = issue_otp(db, new_phone, "change_phone", me.id)
-    else:
-        if not body.phone:
-            raise ApiError(422, "VALIDATION_ERROR", "phone is required.")
-        phone = normalize_phone(body.phone)
-        user = db.scalar(select(User).where(User.phone == phone))
-        if body.purpose == "reset" and (user is None or not user.phone_verified):
-            raise ApiError(404, "RESET_PHONE_NOT_FOUND", "No verified account is registered with that phone number.")
-        if user is not None and (
-            (body.purpose == "register" and not user.phone_verified) or (body.purpose == "reset" and user.phone_verified)
-        ):
-            code = issue_otp(db, phone, body.purpose, user.id)
-    out = {"sent": True}
-    if settings.debug_return_otp and code:
-        out["dev_otp"] = code
-    return out
+        email = normalize_email(me.email)
+        issue_otp(db, email, "change_phone", me.id, phone=new_phone)
+        return {"sent": True}
+
+    if not body.email:
+        raise ApiError(422, "VALIDATION_ERROR", "email is required.")
+    email = normalize_email(body.email)
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None:
+        raise ApiError(404, "ACCOUNT_NOT_FOUND", "No account is registered with that email address.")
+    if not user.email_verified:
+        raise ApiError(403, "EMAIL_NOT_VERIFIED", "Verify your email address before resetting its password.")
+    if body.purpose == "reset":
+        db.execute(
+            update(PasswordResetGrant)
+            .where(PasswordResetGrant.user_id == user.id, PasswordResetGrant.consumed == False)  # noqa: E712
+            .values(consumed=True)
+        )
+    issue_otp(db, email, body.purpose, user.id)
+    return {"sent": True}
 
 
 class OtpVerify(BaseModel):
-    purpose: Literal["register", "reset", "change_phone"]
-    phone: str  # for change_phone this is the NEW phone number
-    code: str = Field(min_length=6, max_length=6)
-    new_password: Optional[str] = None
+    purpose: Literal["reset", "change_phone"]
+    email: Optional[str] = None
+    phone: Optional[str] = None  # for change_phone this is the NEW phone number
+    code: str = Field(pattern=r"^\d{6}$")
 
 
 @router.post("/otp/verify")  # E-03
 def otp_verify(body: OtpVerify, db=Depends(get_db)):
-    phone = normalize_phone(body.phone)
-    if body.purpose == "reset" and body.new_password is not None:
-        validate_password(body.new_password)
-    row = verify_otp(db, phone, body.purpose, body.code)
+    if not body.email:
+        raise ApiError(422, "VALIDATION_ERROR", "email is required.")
+    email = normalize_email(body.email)
+    row = verify_otp(db, email, body.purpose, body.code)
 
-    if body.purpose == "register":
-        user = db.get(User, row.user_id)
-        if user is None:
+    user = db.get(User, row.user_id)
+    if user is None or user.email != email:
+        raise ApiError(400, "OTP_INVALID", "Code is invalid or has expired.")
+    if body.purpose == "reset":
+        if not user.email_verified or row.user_id != user.id:
             raise ApiError(400, "OTP_INVALID", "Code is invalid or has expired.")
-        user.phone_verified = True
-    elif body.purpose == "reset":
-        user = db.get(User, row.user_id)
-        if user is None or user.phone != phone:
-            raise ApiError(400, "OTP_INVALID", "Code is invalid or has expired.")
-        if body.new_password is not None:
-            user.password_hash = hash_password(body.new_password)
-            db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id).values(revoked=True))
-            db.commit()
-            identity = db.scalar(select(FirebaseIdentity).where(FirebaseIdentity.user_id == user.id))
-            revoke_firebase_user(identity.firebase_uid if identity else user.id)
-            return {"verified": True}
-        else:
-            reset_token = secrets.token_urlsafe(32)
-            db.add(
-                PasswordResetGrant(
-                    user_id=user.id,
-                    token_hash=hash_token(reset_token),
-                    expires_at=utcnow() + timedelta(minutes=settings.otp_minutes),
-                )
+        reset_token = secrets.token_urlsafe(32)
+        db.add(
+            PasswordResetGrant(
+                user_id=user.id,
+                token_hash=hash_token(reset_token),
+                expires_at=utcnow() + timedelta(minutes=10),
             )
-            db.commit()
-            return {"verified": True, "reset_token": reset_token}
-    else:  # change_phone
-        user = db.get(User, row.user_id)
-        if user is None or db.scalar(select(User).where(User.phone == phone)):
-            raise ApiError(409, "PHONE_IN_USE", "This phone number is already registered.")
-        user.phone = phone
-        user.phone_verified = True
-        db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id).values(revoked=True))
+        )
         db.commit()
-        identity = db.scalar(select(FirebaseIdentity).where(FirebaseIdentity.user_id == user.id))
-        revoke_firebase_user(identity.firebase_uid if identity else user.id)
-        return {"verified": True}
+        return {"verified": True, "reset_token": reset_token}
+
+    if not body.phone:
+        raise ApiError(422, "VALIDATION_ERROR", "phone is required.")
+    phone = normalize_phone(body.phone)
+    if row.phone != phone:
+        raise ApiError(400, "OTP_INVALID", "Code is invalid or has expired.")
+    if db.scalar(select(User).where(User.phone == phone)):
+        raise ApiError(409, "PHONE_IN_USE", "This phone number is already registered.")
+    user.phone = phone
+    user.phone_verified = True
+    db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id).values(revoked=True))
     db.commit()
+    identity = db.scalar(select(FirebaseIdentity).where(FirebaseIdentity.user_id == user.id))
+    revoke_firebase_user(identity.firebase_uid if identity else user.id)
     return {"verified": True}
 
 
 class PasswordResetBody(BaseModel):
     reset_token: str = Field(min_length=32, max_length=128)
-    new_password: str
+    new_password: str = Field(min_length=8, max_length=72)
 
 
 @router.post("/password/reset")
 def reset_password(body: PasswordResetBody, db=Depends(get_db)):
     validate_password(body.new_password)
     now = utcnow()
-    token_hash = hash_token(body.reset_token)
-    grant = db.scalar(select(PasswordResetGrant).where(PasswordResetGrant.token_hash == token_hash))
+    grant = db.scalar(select(PasswordResetGrant).where(PasswordResetGrant.token_hash == hash_token(body.reset_token)))
     if grant is None or grant.consumed or grant.expires_at <= now:
         raise ApiError(400, "RESET_TOKEN_INVALID", "Password reset verification is invalid or has expired.")
     user = db.get(User, grant.user_id)
@@ -349,28 +418,60 @@ def reset_password(body: PasswordResetBody, db=Depends(get_db)):
     )
     if consumed.rowcount != 1:
         raise ApiError(400, "RESET_TOKEN_INVALID", "Password reset verification is invalid or has expired.")
+    db.commit()
+    identity = db.scalar(select(FirebaseIdentity).where(FirebaseIdentity.user_id == user.id))
+    firebase_uid = identity.firebase_uid if identity else user.id
+    set_email_password(firebase_uid, body.new_password)
     user.password_hash = hash_password(body.new_password)
     db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id).values(revoked=True))
     db.commit()
-    identity = db.scalar(select(FirebaseIdentity).where(FirebaseIdentity.user_id == user.id))
-    revoke_firebase_user(identity.firebase_uid if identity else user.id)
+    revoke_firebase_user(firebase_uid)
     return {"reset": True}
 
 
 class LoginBody(BaseModel):
-    phone: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
     password: str
 
 
 @router.post("/login")  # E-04
 def login(body: LoginBody, db=Depends(get_db)):
-    phone = normalize_phone(body.phone)
-    login_limiter.check(phone)
-    user = db.scalar(select(User).where(User.phone == phone))
+    if body.email:
+        if "@" in body.email:
+            email = normalize_email(body.email)
+            login_limiter.check(email)
+            user = db.scalar(select(User).where(User.email == email))
+            verified = user.email_verified if user else False
+            email_login = True
+        else:
+            phone = normalize_phone(body.email)
+            login_limiter.check(phone)
+            user = db.scalar(select(User).where(User.phone == phone))
+            verified = user.phone_verified if user else False
+            email_login = False
+    elif body.phone:
+        phone = normalize_phone(body.phone)
+        login_limiter.check(phone)
+        user = db.scalar(select(User).where(User.phone == phone))
+        verified = user.phone_verified if user else False
+        email_login = False
+    else:
+        raise ApiError(422, "VALIDATION_ERROR", "email is required.")
     if user is None or not verify_password(body.password, user.password_hash):
-        raise ApiError(401, "INVALID_CREDENTIALS", "Phone number or password is incorrect.")
-    if not user.phone_verified:
-        raise ApiError(403, "PHONE_NOT_VERIFIED", "Verify your phone number first.")
+        raise ApiError(
+            401,
+            "INVALID_CREDENTIALS",
+            "Email address or password is incorrect." if email_login else "Phone number or password is incorrect.",
+        )
+    if not verified:
+        raise ApiError(
+            403,
+            "EMAIL_NOT_VERIFIED" if email_login else "PHONE_NOT_VERIFIED",
+            "Verify your email address first." if email_login else "Verify your phone number first.",
+        )
+    if user.email:
+        raise ApiError(400, "FIREBASE_AUTH_REQUIRED", "Sign in with Firebase using your email address and password.")
     return {**issue_token_pair(db, user), "role": user.role, "verification_status": user.verification_status}
 
 

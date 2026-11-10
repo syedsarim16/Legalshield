@@ -10,7 +10,7 @@
   const LANG = { en: 'en', rn: 'ur-Latn', ur: 'ur' };
   const roleUi = r => (r === 'ngo_monitor' ? 'ngo' : r);
   const roleApi = r => (r === 'ngo' ? 'ngo_monitor' : r);
-  const OTP_LIFETIME_MS = 60 * 1000;
+  const RESEND_INTERVAL_MS = 60 * 1000;
   const fb = () => window.LegalShieldFirebase;
   ST.form = {}; ST.files = {}; ST.me = null; ST.pending = null; ST.secResults = null; ST.secLoading = false;
   let firebaseUser = null;
@@ -23,7 +23,9 @@
     const update = () => {
       const seconds = Math.max(0, Math.ceil((resendAt - Date.now()) / 1000));
       button.disabled = seconds > 0;
-      countdown.textContent = seconds ? `(${seconds}s)` : '';
+      const minutes = Math.floor(seconds / 60);
+      const remainingSeconds = seconds % 60;
+      countdown.textContent = `(${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')})`;
       return seconds > 0;
     };
     if (update()) {
@@ -102,8 +104,16 @@
     ST.contacts = (await api('GET', '/users/me/contacts')).contacts;
   }
   const home = () => ROLE_HOME[ST.role] || 'S-17';
-  async function signIn(phone, password) {
-    const j = await api('POST', '/auth/login', { phone, password }, { auth: false });
+  async function signIn(email, password) {
+    const result = await fb().signInWithEmailAndPassword(email, password);
+    await result.user.reload();
+    if (!result.user.emailVerified) {
+      await fb().signOut();
+      throw new ApiErr(403, 'EMAIL_NOT_VERIFIED', 'Verify your email address using the link we sent before signing in.');
+    }
+    const idToken = await fb().token(true);
+    if (!idToken) throw new ApiErr(401, 'UNAUTHENTICATED', 'Firebase sign-in could not be established.');
+    const j = await api('POST', '/auth/firebase/email/exchange', { id_token: idToken, password }, { auth: false });
     await useSession(j);
   }
 
@@ -128,17 +138,19 @@
   /* ---------------- UI helpers ---------------- */
   const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
   const otpValue = () => [...document.querySelectorAll('#otp input')].map(i => i.value).join('');
-  const matchesDisplayedOtp = (entered, expected) => {
-    if (typeof expected !== 'string' || !/^\d{6}$/.test(expected)) {
-      showErr('The test verification code is unavailable. Request a new code.');
-      return false;
-    }
-    if (entered !== expected) {
-      showErr('The code does not match the displayed verification code.');
-      return false;
-    }
-    return true;
-  };
+  function wireOtpInputs() {
+    const inputs = [...document.querySelectorAll('#otp input')];
+    inputs.forEach((input, index) => {
+      input.addEventListener('input', () => {
+        input.value = input.value.replace(/\D/g, '').slice(0, 1);
+        if (input.value && inputs[index + 1]) inputs[index + 1].focus();
+      });
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Backspace' && !input.value && inputs[index - 1]) inputs[index - 1].focus();
+      });
+    });
+    if (inputs[0]) inputs[0].focus();
+  }
   function showErr(msg) {
     const old = document.querySelector('.form-err'); if (old) old.remove();
     const body = document.querySelector('.frame .body'); if (!body) { toast(msg); return; }
@@ -150,6 +162,10 @@
     const code = String(error?.code || '').toLowerCase();
     const messages = {
       'auth/invalid-custom-token': 'Firebase could not establish your account session. Check the Firebase project configuration.',
+      'auth/operation-not-allowed': 'Email/password sign-in is disabled. Enable the Email/Password provider in Firebase Authentication.',
+      'auth/unauthorized-continue-uri': 'This app domain is not authorized for Firebase email action links. Add it in Firebase Authentication settings.',
+      'auth/invalid-continue-uri': 'Firebase rejected the email action link destination. Check the authorized domains and app URL.',
+      'auth/email-already-in-use': 'This email address is already registered.',
     };
     return messages[code] || (error?.message ? `Firebase sign-in error: ${error.message}` : 'Something went wrong. Please try again.');
   }
@@ -200,6 +216,9 @@
     fb().initialAuthState().then(user => {
       firebaseUser = user;
       if (!user) return;
+      if (!user.emailVerified && user.email) {
+        return fb().signOut().then(() => { firebaseUser = null; });
+      }
       return loadMe().then(() => {
         if (PUBLIC.has(cur().id)) go(home());
         else render(true);
@@ -233,55 +252,55 @@
     const screen = cur().id, role = { 'S-06': 'citizen', 'S-07': 'lawyer', 'S-08': 'ngo_monitor' }[screen];
     const file = role === 'lawyer' ? ST.files.lic : ST.files.org;
     const fd = new FormData();
-    fd.append('role', role); fd.append('full_name', val('fn')); fd.append('phone', val('ph')); fd.append('password', val('pw'));
+    fd.append('role', role); fd.append('full_name', val('fn')); fd.append('email', val('email')); fd.append('phone', val('ph')); fd.append('password', val('pw'));
     if (val('cn')) fd.append('cnic', val('cn'));
     if (role === 'lawyer') { fd.append('bar_council_no', val('bar')); if (ST.files.lic) fd.append('verification_document', ST.files.lic); }
     if (role === 'ngo_monitor') { fd.append('organisation_name', val('org')); fd.append('districts', val('dist')); if (ST.files.org) fd.append('verification_document', ST.files.org); }
-    const r = await api('POST', '/auth/register', fd, { auth: false, form: true });
-    ST.pending = { phone: val('ph'), password: val('pw'), role, devOtp: r.dev_otp || null, purpose: 'register', resendAt: Date.now() + OTP_LIFETIME_MS };
+    const email = val('email'), password = val('pw');
+    await api('POST', '/auth/register', fd, { auth: false, form: true });
+    await fb().sendEmailVerificationLink(email, password);
+    ST.pending = { email, password, role, resendAt: Date.now() + RESEND_INTERVAL_MS };
     ST.files = {}; ST.form = {};
     HIST.push(location.hash); go('S-09');
+    render(true);
+    toast('Verification link sent to your email.');
   }, el);
 
-  /* ---------------- M1: OTP (register) ---------------- */
-  const s09 = SCREENS['S-09'], s09render = s09.render;
-  s09.render = ctx => {
-    let h = s09render(ctx);
-    const p = ST.pending;
-    if (p) h = h.replace(/\+92 300 ••• 4567/, '+92 ' + p.phone.replace(/\D/g, '').replace(/^(0|92)/, '').replace(/^(\d{3})\d{3}(\d{4})$/, '$1 ••• $2'));
-    return h.replace('<div id="otp-dev-code" class="t-cap c-2 center" aria-live="polite"></div>',
-      p && p.devOtp ? `<div id="otp-dev-code" class="t-cap c-2 center" aria-live="polite">Test verification code: <b>${p.devOtp}</b></div>` : '');
-  };
-  ACTS.verifyotp = el => guard(async () => {
+  /* ---------------- M1: Email verification ---------------- */
+  ACTS.verifyemail = el => guard(async () => {
     const p = ST.pending; if (!p) { go('S-10'); return; }
-    const code = otpValue(); if (code.length !== 6) { showErr('Enter the 6-digit code.'); return; }
-    if (!matchesDisplayedOtp(code, p.devOtp)) return;
-    await api('POST', '/auth/otp/verify', { purpose: 'register', phone: p.phone, code }, { auth: false });
-    const { phone, password } = p; ST.pending = null;
-    await signIn(phone, password);
-    if (ST.role !== 'citizen') setTimeout(() => toast('Phone verified. Your account is pending admin verification.'), 200);
-    else setTimeout(() => toast('Phone verified. Welcome to LegalShield.'), 200);
+    const { email, password } = p;
+    await signIn(email, password);
+    ST.pending = null;
+    if (ST.role !== 'citizen') setTimeout(() => toast('Email verified. Your account is pending admin verification.'), 200);
+    else setTimeout(() => toast('Email verified. Welcome to LegalShield.'), 200);
   }, el);
+  const s09 = SCREENS['S-09'];
   s09.mount = ((orig) => ctx => {
-    orig(ctx);
+    if (orig) orig(ctx);
     if (ST.pending) startResendCountdown('register-resend', 'register-resend-countdown', ST.pending.resendAt || Date.now());
   })(s09.mount);
-  ACTS.resendotp = el => guard(async () => {
+  ACTS.resendemail = el => guard(async () => {
     const p = ST.pending; if (!p) return;
     if (Date.now() < p.resendAt) return;
-    const r = await api('POST', '/auth/otp/request', { purpose: 'register', phone: p.phone }, { auth: false });
-    p.devOtp = r.dev_otp || null; p.resendAt = Date.now() + OTP_LIFETIME_MS; render(true); toast('New code sent');
+    const sent = await fb().sendEmailVerificationLink(p.email, p.password);
+    if (!sent) { await signIn(p.email, p.password); return; }
+    p.resendAt = Date.now() + RESEND_INTERVAL_MS; render(true); toast('New verification link sent.');
   }, el);
 
   /* ---------------- M1: login ---------------- */
   ACTS.login = el => guard(async () => {
-    const phone = val('ph'), password = val('pw');
-    if (!phone || !password) { showErr('Enter your mobile number and password.'); return; }
-    try { await signIn(phone, password); }
+    const email = val('email'), password = val('pw');
+    if (!email || !password) { showErr('Enter your email address and password.'); return; }
+    try { await signIn(email, password); }
     catch (e) {
-      if (e.code === 'PHONE_NOT_VERIFIED') {
-        const r = await api('POST', '/auth/otp/request', { purpose: 'register', phone }, { auth: false });
-        ST.pending = { phone, password, devOtp: r.dev_otp || null, purpose: 'register', resendAt: Date.now() + OTP_LIFETIME_MS }; HIST.push(location.hash); go('S-09'); return;
+      if (e.code === 'EMAIL_NOT_VERIFIED') {
+        ST.pending = { email, password, resendAt: Date.now() }; HIST.push(location.hash); go('S-09');
+        await fb().sendEmailVerificationLink(email, password);
+        ST.pending.resendAt = Date.now() + RESEND_INTERVAL_MS;
+        render(true);
+        toast('Verification link sent to your email.');
+        return;
       }
       throw e;
     }
@@ -289,38 +308,41 @@
 
   /* ---------------- M1: forgot password ---------------- */
   ACTS.fpnext = el => guard(async () => {
-    const step = vs('S-11') || 'phone';
-    if (step === 'phone') {
-      const phone = val('ph'); if (!phone) { showErr('Enter your mobile number.'); return; }
-      const r = await api('POST', '/auth/otp/request', { purpose: 'reset', phone }, { auth: false });
-      ST.reset = { phone, devOtp: r.dev_otp || null, resendAt: Date.now() + OTP_LIFETIME_MS }; setVS('otp', 'S-11');
+    const step = vs('S-11') || 'email';
+    if (step === 'email') {
+      const email = val('email'); if (!email) { showErr('Enter your registered email address.'); return; }
+      await api('POST', '/auth/otp/request', { purpose: 'reset', email }, { auth: false });
+      ST.reset = { email, resendAt: Date.now() + RESEND_INTERVAL_MS };
+      setVS('otp', 'S-11');
+      toast('Password reset code sent to your email.');
     } else if (step === 'otp') {
-      const code = otpValue(); if (code.length !== 6) { showErr('Enter the 6-digit code.'); return; }
-      if (!matchesDisplayedOtp(code, ST.reset?.devOtp)) return;
-      const r = await api('POST', '/auth/otp/verify', { purpose: 'reset', phone: ST.reset.phone, code }, { auth: false });
-      ST.reset.resetToken = r.reset_token; setVS('password', 'S-11');
+      const code = otpValue();
+      if (!/^\d{6}$/.test(code)) { showErr('Enter the 6-digit code sent to your email.'); return; }
+      const result = await api('POST', '/auth/otp/verify', { purpose: 'reset', email: ST.reset.email, code }, { auth: false });
+      ST.reset.resetToken = result.reset_token;
+      setVS('password', 'S-11');
+      toast('Email verified. You can now choose a new password.');
     } else {
-      const np = val('np');
-      await api('POST', '/auth/password/reset', { reset_token: ST.reset.resetToken, new_password: np }, { auth: false });
-      ST.reset = null; toast('Password changed. Please log in.'); setTimeout(() => go('S-10'), 700);
+      const newPassword = val('new-password');
+      if (!newPassword) { showErr('Enter a new password.'); return; }
+      await api('POST', '/auth/password/reset', { reset_token: ST.reset.resetToken, new_password: newPassword }, { auth: false });
+      ST.reset = null;
+      toast('Password updated. Sign in with your new password.');
+      setTimeout(() => go('S-10'), 700);
     }
   }, el);
-  const s11 = SCREENS['S-11'], s11render = s11.render;
-  s11.render = ctx => {
-    const h = s11render(ctx);
-    return h.replace('<div id="reset-otp-dev-code" class="t-cap c-2 center" aria-live="polite"></div>',
-      ST.reset && ST.reset.devOtp && ctx.s === 'otp'
-        ? `<div id="reset-otp-dev-code" class="t-cap c-2 center" aria-live="polite">Test verification code: <b>${ST.reset.devOtp}</b></div>`
-        : '');
-  };
+  const s11 = SCREENS['S-11'];
   s11.mount = ((orig) => ctx => {
     if (orig) orig(ctx);
-    if (ctx.s === 'otp' && ST.reset) startResendCountdown('reset-resend', 'reset-resend-countdown', ST.reset.resendAt || Date.now());
+    if (ctx.s === 'otp') {
+      wireOtpInputs();
+      if (ST.reset) startResendCountdown('reset-resend', 'reset-resend-countdown', ST.reset.resendAt || Date.now());
+    }
   })(s11.mount);
   ACTS.resendresetotp = el => guard(async () => {
     const reset = ST.reset; if (!reset || Date.now() < reset.resendAt) return;
-    const r = await api('POST', '/auth/otp/request', { purpose: 'reset', phone: reset.phone }, { auth: false });
-    reset.devOtp = r.dev_otp || null; reset.resendAt = Date.now() + OTP_LIFETIME_MS; render(true); toast('New code sent');
+    await api('POST', '/auth/otp/request', { purpose: 'reset', email: reset.email }, { auth: false });
+    reset.resendAt = Date.now() + RESEND_INTERVAL_MS; render(true); toast('New password reset code sent.');
   }, el);
 
   /* ---------------- M1: profile ---------------- */
@@ -358,31 +380,26 @@
   ACTS.cpnext = el => guard(async () => {
     if ((vs('S-14') || 'password') === 'otp') {
       const code = otpValue(); if (code.length !== 6) { showErr('Enter the 6-digit code.'); return; }
-      if (!matchesDisplayedOtp(code, ST.cp?.devOtp)) return;
-      await api('POST', '/auth/otp/verify', { purpose: 'change_phone', phone: ST.cp.newPhone, code }, { auth: false });
+      await api('POST', '/auth/otp/verify', { purpose: 'change_phone', email: ST.me.email, phone: ST.cp.newPhone, code }, { auth: false });
       ST.cp = null; endSession(false); toast('Phone number changed. Please log in again.'); setTimeout(() => go('S-10'), 900);
     } else {
       const newPhone = val('np'), pw = val('pw'); if (!newPhone || !pw) { showErr('Enter your password and the new number.'); return; }
-      const r = await api('POST', '/auth/otp/request', { purpose: 'change_phone', new_phone: newPhone, current_password: pw });
-      ST.cp = { newPhone, currentPassword: pw, devOtp: r.dev_otp || null, resendAt: Date.now() + OTP_LIFETIME_MS }; setVS('otp', 'S-14');
+      await api('POST', '/auth/otp/request', { purpose: 'change_phone', new_phone: newPhone, current_password: pw });
+      ST.cp = { newPhone, currentPassword: pw, resendAt: Date.now() + RESEND_INTERVAL_MS }; setVS('otp', 'S-14');
     }
   }, el);
-  const s14 = SCREENS['S-14'], s14render = s14.render;
-  s14.render = ctx => {
-    const h = s14render(ctx);
-    return h.replace('<div id="change-phone-otp-dev-code" class="t-cap c-2 center" aria-live="polite"></div>',
-      ST.cp && ST.cp.devOtp && ctx.s === 'otp'
-        ? `<div id="change-phone-otp-dev-code" class="t-cap c-2 center" aria-live="polite">Test verification code: <b>${ST.cp.devOtp}</b></div>`
-        : '');
-  };
+  const s14 = SCREENS['S-14'];
   s14.mount = ((orig) => ctx => {
     if (orig) orig(ctx);
-    if (ctx.s === 'otp' && ST.cp) startResendCountdown('change-phone-resend', 'change-phone-resend-countdown', ST.cp.resendAt || Date.now());
+    if (ctx.s === 'otp' && ST.cp) {
+      wireOtpInputs();
+      startResendCountdown('change-phone-resend', 'change-phone-resend-countdown', ST.cp.resendAt || Date.now());
+    }
   })(s14.mount);
   ACTS.resendchangeotp = el => guard(async () => {
     const pending = ST.cp; if (!pending || Date.now() < pending.resendAt) return;
-    const r = await api('POST', '/auth/otp/request', { purpose: 'change_phone', new_phone: pending.newPhone, current_password: pending.currentPassword });
-    pending.devOtp = r.dev_otp || null; pending.resendAt = Date.now() + OTP_LIFETIME_MS; render(true); toast('New code sent');
+    await api('POST', '/auth/otp/request', { purpose: 'change_phone', new_phone: pending.newPhone, current_password: pending.currentPassword });
+    pending.resendAt = Date.now() + RESEND_INTERVAL_MS; render(true); toast('New code sent');
   }, el);
 
   /* ---------------- M1: delete account ---------------- */

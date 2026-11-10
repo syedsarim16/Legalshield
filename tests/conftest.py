@@ -3,7 +3,6 @@ import os
 
 os.environ.update(
     JWT_SECRET="test-secret",
-    DEBUG_RETURN_OTP="true",
     OTP_MINUTES="1",
     ALLOW_UNREVIEWED_STATUTES="true",
     OTP_RATE_LIMIT="1000",
@@ -19,6 +18,7 @@ import app.firebase as firebase_module
 import app.main as app_main
 import app.routers.auth as auth_module
 import app.services.accounts as accounts_module
+import app.services.otp as otp_module
 import app.services.tokens as tokens_module
 from app.main import app as fastapi_app
 from app.models import User
@@ -151,9 +151,38 @@ def _run_transaction(function, transaction):
 test_firestore = Firestore()
 
 
+class TestEmailSender:
+    def __init__(self):
+        self.messages = []
+
+    def send(self, recipient, subject, body):
+        self.messages.append((recipient, subject, body))
+
+
+test_email_sender = TestEmailSender()
+
+
+def latest_email_code(email):
+    import re
+
+    messages = [message for message in test_email_sender.messages if message[0] == email]
+    assert messages, f"No email was sent to {email}"
+    codes = re.findall(r"\b\d{6}\b", messages[-1][2])
+    assert codes, f"No verification code was included in the email to {email}"
+    return codes[-1]
+
+
+def email_for_phone(phone):
+    import re
+
+    digits = re.sub(r"\D", "", phone)
+    return f"user-{digits}@example.test"
+
+
 @pytest.fixture()
 def client(monkeypatch):
     test_firestore.data.clear()
+    test_email_sender.messages.clear()
     monkeypatch.setattr(app_db, "firestore_client", lambda: test_firestore)
     monkeypatch.setattr(
         app_db,
@@ -166,18 +195,30 @@ def client(monkeypatch):
     monkeypatch.setattr(app_main, "admin_ready", lambda: True)
 
     def verify_token(value):
-        if not value.startswith("test-uid:"):
-            from app.errors import ApiError
-            raise ApiError(401, "FIREBASE_TOKEN_INVALID", "Firebase sign-in could not be verified.")
-        return {"uid": value.removeprefix("test-uid:")}
+        if value.startswith("test-email:"):
+            _, uid, email, verified = value.split(":", 3)
+            return {
+                "uid": uid,
+                "email": email,
+                "email_verified": verified == "true",
+                "firebase": {"sign_in_provider": "password"},
+            }
+        if value.startswith("test-uid:"):
+            return {"uid": value.removeprefix("test-uid:"), "email_verified": True}
+        from app.errors import ApiError
+        raise ApiError(401, "FIREBASE_TOKEN_INVALID", "Firebase sign-in could not be verified.")
 
     monkeypatch.setattr(app_deps, "verify_id_token", verify_token)
     monkeypatch.setattr(auth_module, "verify_id_token", verify_token)
     monkeypatch.setattr(tokens_module, "create_custom_token", lambda uid: f"test-uid:{uid}")
+    monkeypatch.setattr(auth_module, "create_email_user", lambda *args: None)
+    monkeypatch.setattr(auth_module, "set_email_password", lambda *args: None)
+    monkeypatch.setattr(auth_module, "delete_auth_user", lambda *args: None)
     monkeypatch.setattr(auth_module, "upload_document", lambda *args: True)
     monkeypatch.setattr(auth_module, "delete_document", lambda *args: None)
     monkeypatch.setattr(accounts_module, "delete_document", lambda *args: None)
     monkeypatch.setattr(accounts_module, "delete_user_preferences", lambda *args: None)
+    monkeypatch.setattr(otp_module, "get_email_sender", lambda: test_email_sender)
     monkeypatch.setattr(auth_module, "revoke_firebase_user", lambda *args: None)
     monkeypatch.setattr(accounts_module, "delete_auth_user", lambda *args: None)
     auth.login_limiter.reset()
@@ -187,18 +228,20 @@ def client(monkeypatch):
 
 
 def register_and_login(client, role="citizen", phone="03001234567", password="Passw0rd!", **extra):
-    data = {"role": role, "full_name": "Test User", "phone": phone, "password": password, **extra}
+    email = extra.get("email") or email_for_phone(phone)
+    data = {"role": role, "full_name": "Test User", "phone": phone, "email": email, "password": password, **extra}
     files = None
     if role in ("lawyer", "ngo_monitor"):
         files = {"verification_document": ("licence.png", PNG, "image/png")}
     r = client.post(f"{API}/auth/register", data=data, files=files)
     assert r.status_code == 201, r.text
-    v = client.post(f"{API}/auth/otp/verify", json={"purpose": "register", "phone": phone, "code": r.json()["dev_otp"]})
+    v = client.post(
+        f"{API}/auth/firebase/email/exchange",
+        json={"id_token": f"test-email:{r.json()['user_id']}:{email}:true"},
+    )
     assert v.status_code == 200, v.text
-    login = client.post(f"{API}/auth/login", json={"phone": phone, "password": password})
-    assert login.status_code == 200, login.text
-    tokens = login.json()
-    return tokens, {"Authorization": f"Bearer {tokens['firebase_custom_token']}"}
+    tokens = v.json()
+    return tokens, {"Authorization": f"Bearer test-uid:{r.json()['user_id']}"}
 
 
 @pytest.fixture()

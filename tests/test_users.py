@@ -1,4 +1,4 @@
-from .conftest import API, make_admin, register_and_login
+from .conftest import API, email_for_phone, latest_email_code, make_admin, register_and_login
 
 
 def test_update_profile(client, citizen):
@@ -47,10 +47,11 @@ def test_change_phone_flow(client, citizen):
     assert bad.status_code == 401
     r = client.post(f"{API}/auth/otp/request", headers=h, json={"purpose": "change_phone", "new_phone": "03351234567", "current_password": "Passw0rd!"})
     assert r.status_code == 200
-    v = client.post(f"{API}/auth/otp/verify", json={"purpose": "change_phone", "phone": "03351234567", "code": r.json()["dev_otp"]})
+    email = email_for_phone("03001234567")
+    v = client.post(f"{API}/auth/otp/verify", json={"purpose": "change_phone", "email": email, "phone": "03351234567", "code": latest_email_code(email)})
     assert v.status_code == 200
     assert client.post(f"{API}/auth/refresh", json={"refresh_token": tokens["refresh_token"]}).status_code == 401
-    assert client.post(f"{API}/auth/login", json={"phone": "03351234567", "password": "Passw0rd!"}).status_code == 200
+    assert client.post(f"{API}/auth/login", json={"phone": "03351234567", "password": "Passw0rd!"}).json()["error"]["code"] == "FIREBASE_AUTH_REQUIRED"
     assert client.post(f"{API}/auth/login", json={"phone": "03001234567", "password": "Passw0rd!"}).status_code == 401
 
 

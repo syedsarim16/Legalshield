@@ -156,6 +156,59 @@ def create_custom_token(uid: str) -> str:
         raise ApiError(503, "FIREBASE_UNAVAILABLE", "Firebase authentication is temporarily unavailable.") from exc
 
 
+def create_email_user(uid: str, email: str, password: str, display_name: str) -> None:
+    if not admin_ready() or firebase_auth is None:
+        raise ApiError(503, "FIREBASE_UNAVAILABLE", "Firebase server credentials are not configured.")
+    try:
+        try:
+            existing = firebase_auth.get_user(uid)
+        except firebase_auth.UserNotFoundError:
+            firebase_auth.create_user(
+                uid=uid,
+                email=email,
+                password=password,
+                email_verified=False,
+                display_name=display_name,
+            )
+            return
+        if existing.email and existing.email.lower() != email:
+            raise ApiError(409, "FIREBASE_ACCOUNT_EXISTS", "This Firebase account is already linked to another email.")
+        firebase_auth.update_user(
+            uid,
+            email=email,
+            password=password,
+            email_verified=False,
+            display_name=display_name,
+        )
+    except ApiError:
+        raise
+    except Exception as exc:
+        if isinstance(exc, firebase_auth.EmailAlreadyExistsError):
+            raise ApiError(409, "EMAIL_IN_USE", "This email address is already registered.") from exc
+        log.error("Firebase email account creation failed (%s).", type(exc).__name__)
+        raise ApiError(503, "FIREBASE_UNAVAILABLE", "Firebase email authentication is temporarily unavailable.") from exc
+
+
+def set_email_verified(uid: str) -> None:
+    if not admin_ready() or firebase_auth is None:
+        raise ApiError(503, "FIREBASE_UNAVAILABLE", "Firebase server credentials are not configured.")
+    try:
+        firebase_auth.update_user(uid, email_verified=True)
+    except Exception as exc:
+        log.error("Firebase email verification update failed (%s).", type(exc).__name__)
+        raise ApiError(503, "FIREBASE_UNAVAILABLE", "Email verification could not be completed. Please try again.") from exc
+
+
+def set_email_password(uid: str, password: str) -> None:
+    if not admin_ready() or firebase_auth is None:
+        raise ApiError(503, "FIREBASE_UNAVAILABLE", "Firebase server credentials are not configured.")
+    try:
+        firebase_auth.update_user(uid, password=password)
+    except Exception as exc:
+        log.error("Firebase password update failed (%s).", type(exc).__name__)
+        raise ApiError(503, "FIREBASE_UNAVAILABLE", "The password could not be updated. Please try again.") from exc
+
+
 def revoke_firebase_user(uid: str) -> None:
     if not admin_ready() or firebase_auth is None:
         raise ApiError(503, "FIREBASE_UNAVAILABLE", "Firebase server credentials are not configured.")

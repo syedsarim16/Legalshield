@@ -46,8 +46,9 @@ reg('S-05', { name: 'Choose role', module: 'M1 Account', roles: 'all', frame: 'p
   render: () => back('Create account', `<div class="auth-head"><div class="auth-kicker">${t('LegalShield')}</div><div class="t-title2">${t('Choose your account')}</div><div class="t-body c-2">${t('Select the role that best matches how you will use LegalShield.')}</div></div><div class="stack g12" role="radiogroup">${radio(t('Citizen'), 'Get help with your rights, SOS and evidence', ST.regRole === 'citizen', 'regrole', 'citizen')}${radio(t('Lawyer'), 'Offer advice. Needs Bar Council verification', ST.regRole === 'lawyer', 'regrole', 'lawyer')}${radio(t('NGO monitor'), 'Receive alerts and see anonymised reports. Needs verification', ST.regRole === 'ngo', 'regrole', 'ngo')}</div><div class="grow"></div>${btn('Continue', { act: 'regnext' })}`) });
 
 const regForm = (extra, s, title) => back(title, `${stepper(3, 1)}
-  <div class="auth-head"><div class="auth-kicker">${t('Protected account setup')}</div><div class="t-title2">${t('Tell us about yourself')}</div><div class="t-body c-2">${t('Enter the test verification code shown on the next screen to activate your account.')}</div></div>
+  <div class="auth-head"><div class="auth-kicker">${t('Protected account setup')}</div><div class="t-title2">${t('Tell us about yourself')}</div><div class="t-body c-2">${t('We will email you a 6-digit verification code to activate your account.')}</div></div>
   ${field({ id: 'fn', label: 'Full name', ph: 'As on your CNIC', value: s === 'errors' ? 'Sample Citizen' : '' })}
+  ${field({ id: 'email', label: 'Email address', ph: 'you@example.com', type: 'email', ltr: true })}
   ${field({ id: 'ph', label: 'Mobile number', pre: '+92', ph: '300 1234567', type: 'tel', ltr: true, value: s === 'errors' ? '300 1234567' : '', error: s === 'errors' ? 'This number is already registered' : '', inputmode: 'numeric' })}
   ${field({ id: 'cn', label: 'CNIC', ph: '12345-1234567-1', ltr: true, value: s === 'errors' ? '35202-12345' : '', error: s === 'errors' ? 'Enter 13 digits like 12345-1234567-1' : '', help: s === 'errors' ? '' : 'Format check only. We do not verify with NADRA.' })}
   ${extra}
@@ -59,29 +60,26 @@ reg('S-07', { name: 'Register: lawyer', module: 'M1 Account', api: 'E-01', roles
 reg('S-08', { name: 'Register: NGO monitor', module: 'M1 Account', api: 'E-01', roles: 'N', frame: 'phone', states: ['default', 'errors'],
   render: ({ s }) => regForm(`${field({ id: 'org', label: 'Organisation name', ph: 'Your organisation' })}${field({ id: 'dist', label: 'Districts you cover', select: DISTRICTS, value: 'Islamabad' })}<div class="stack g8"><label class="t-label">${t('Proof of organisation')}</label>${filepick(ST.file_org, 'Upload proof document', 'registration_letter.pdf  |  0.8 MB', 'pickfile').replace('data-act="pickfile"', 'data-act="pickfile" data-v="org"')}</div>`, s, 'NGO monitor account') });
 
-reg('S-09', { name: 'OTP verification', module: 'M1 Account', api: 'E-03, E-02', roles: 'all', frame: 'phone', states: ['default', 'wrong code', 'expired'],
-  render: ({ s }) => back('Verify your number', `<div class="t-bodyl c-2">${t('Enter the 6-digit test code for +92 300 ••• 4567.')}</div>
-   <div class="otp${s === 'wrong code' ? ' err' : ''}" id="otp">${Array.from({ length: 6 }, (_, i) => `<input inputmode="numeric" maxlength="1" aria-label="Digit ${i + 1}">`).join('')}</div>
-   <div id="otp-dev-code" class="t-cap c-2 center" aria-live="polite"></div>
-   ${s === 'wrong code' ? `<div class="help c-dng row g8 center" style="justify-content:center">${ic('alert', 16)}${t('That code is not correct')}</div>` : ''}${s === 'expired' ? banner('warning', 'This code has expired. Request a new one.') : ''}
-   <button id="register-resend" class="btn btn-tertiary btn-M" style="align-self:center" data-act="resendotp" disabled><span>${t('Resend code')}</span> <span id="register-resend-countdown" aria-live="polite"></span></button><div class="grow"></div>${btn('Verify', { act: 'verifyotp' })}`),
-  mount: () => { const ins = [...document.querySelectorAll('#otp input')]; ins.forEach((el, i) => { el.addEventListener('input', () => { el.value = el.value.replace(/\D/g, ''); if (el.value && ins[i + 1]) ins[i + 1].focus(); }); el.addEventListener('keydown', e => { if (e.key === 'Backspace' && !el.value && ins[i - 1]) ins[i - 1].focus(); }); }); if (ins[0]) ins[0].focus(); } });
+reg('S-09', { name: 'Email verification', module: 'M1 Account', api: 'Firebase email link', roles: 'all', frame: 'phone', states: ['default'],
+  render: () => back('Verify your email', `<div class="t-bodyl c-2">${t('Open the verification link we sent to your inbox. After verifying, return here to continue.')}</div>
+   <div class="card"><div class="t-title3">${t('Check your email')}</div><div class="t-body c-2">${esc(ST.pending?.email || '')}</div></div>
+   <button id="register-resend" class="btn btn-tertiary btn-M" style="align-self:center" data-act="resendemail" disabled><span id="register-resend-countdown" aria-live="polite"></span> <span>${t('Resend verification link')}</span></button><div class="grow"></div>${btn('I have verified my email', { act: 'verifyemail' })}`) });
 
 reg('S-10', { name: 'Login', module: 'M1 Account', api: 'E-04', roles: 'all', frame: 'phone', states: ['default', 'error', 'locked'],
-  render: ({ s }) => back('Log in', `${s === 'error' ? banner('danger', 'Wrong number or password.') : ''}${s === 'locked' ? banner('warning', 'Too many attempts. Try again in 10 minutes.') : ''}
+  render: ({ s }) => back('Log in', `${s === 'error' ? banner('danger', 'Wrong email or password.') : ''}${s === 'locked' ? banner('warning', 'Too many attempts. Try again in 10 minutes.') : ''}
    <div class="login-hero"><div class="auth-brand"><span class="auth-logo">${ic('shield', 20)}</span><span>LegalShield</span><span class="auth-live">${t('Protected')}</span></div><div class="auth-hero-title">${t('Welcome back')}</div><div class="auth-hero-copy">${t('Your rights, contacts and trusted legal tools are ready when you are.')}</div></div>
-   <div class="auth-trust"><span class="auth-trust-icon">${ic('shield', 20)}</span><span class="stack g4"><b>${t('Your account is protected')}</b><span>${t('Sign in with your password. Verification codes are generated for testing.')}</span></span></div>
-   <div class="login-fields">${field({ id: 'ph', label: 'Mobile number', pre: '+92', ph: '300 1234567', ltr: true, type: 'tel' })}${field({ id: 'pw', label: 'Password', type: 'password', ph: 'Your password', icon: 'visible' })}</div>
+   <div class="auth-trust"><span class="auth-trust-icon">${ic('shield', 20)}</span><span class="stack g4"><b>${t('Your account is protected')}</b><span>${t('Sign in with your verified email address and password.')}</span></span></div>
+   <div class="login-fields">${field({ id: 'email', label: 'Email address or mobile number', ph: 'you@example.com', ltr: true })}${field({ id: 'pw', label: 'Password', type: 'password', ph: 'Your password', icon: 'visible' })}</div>
    <a class="c-pri t-label" style="text-decoration:underline;cursor:pointer;align-self:flex-start" data-go="S-11">${t('Forgot password?')}</a>
    <div class="card" style="border-style:dashed;gap:8px"><div class="t-cap c-2">${t('Prototype only: log in as')}</div>${seg(['Citizen', 'Lawyer', 'NGO', 'Admin'], roleLabel(ST.role) === 'NGO monitor' ? 'NGO' : roleLabel(ST.role), 'demorole')}</div>
    <div class="grow"></div>${btn('Log in', { act: 'login', dis: s === 'locked' })}<div class="auth-footnote">${t('New to LegalShield?')} <a data-go="S-05">${t('Create an account')}</a></div>`) });
 
-reg('S-11', { name: 'Forgot password', module: 'M1 Account', api: 'E-02, E-03', roles: 'all', frame: 'phone', states: ['phone', 'otp', 'password'],
-  render: ({ s }) => back('Reset password', `${stepper(3, ['phone', 'otp', 'password'].indexOf(s) + 1)}
-   ${s === 'phone' ? `<div class="t-bodyl c-2">${t('Enter your registered mobile number.')}</div>${field({ id: 'ph', label: 'Mobile number', pre: '+92', ph: '300 1234567', ltr: true })}` : ''}
-   ${s === 'otp' ? `<div class="t-bodyl c-2">${t('Enter the 6-digit verification code.')}</div><div class="otp" id="otp">${Array.from({ length: 6 }, () => '<input inputmode="numeric" maxlength="1">').join('')}</div><div id="reset-otp-dev-code" class="t-cap c-2 center" aria-live="polite"></div><button id="reset-resend" class="btn btn-tertiary btn-M" data-act="resendresetotp" disabled><span>${t('Resend code')}</span> <span id="reset-resend-countdown" aria-live="polite"></span></button>` : ''}
-   ${s === 'password' ? `${field({ id: 'np', label: 'New password', type: 'password', ph: 'At least 8 characters', icon: 'visible' })}${banner('info', 'You will be signed out on all other devices.')}` : ''}
-   <div class="grow"></div>${btn(s === 'password' ? 'Save password' : 'Continue', { act: 'fpnext' })}`) });
+reg('S-11', { name: 'Forgot password', module: 'M1 Account', api: 'Email OTP', roles: 'all', frame: 'phone', states: ['email', 'otp', 'password'],
+  render: ({ s }) => back('Reset password', `${stepper(3, ['email', 'otp', 'password'].indexOf(s) + 1)}
+   ${s === 'email' ? `<div class="t-bodyl c-2">${t('Enter your registered email address. We will email you a 6-digit verification code.')}</div>${field({ id: 'email', label: 'Email address', ph: 'you@example.com', ltr: true, type: 'email' })}` : ''}
+   ${s === 'otp' ? `<div class="t-bodyl c-2">${t('Enter the 6-digit code sent to')} ${esc(ST.reset?.email || '')}.</div><div class="otp" id="otp">${Array.from({ length: 6 }, () => '<input inputmode="numeric" maxlength="1" autocomplete="one-time-code">').join('')}</div><button id="reset-resend" class="btn btn-tertiary btn-M" data-act="resendresetotp" disabled><span id="reset-resend-countdown" aria-live="polite"></span> <span>${t('Resend verification code')}</span></button>` : ''}
+   ${s === 'password' ? `<div class="t-bodyl c-2">${t('Choose a new password for your account.')}</div>${field({ id: 'new-password', label: 'New password', type: 'password', ph: 'At least 8 characters', icon: 'visible' })}` : ''}
+   <div class="grow"></div>${btn(s === 'email' ? 'Send verification code' : s === 'otp' ? 'Verify code' : 'Update password', { act: 'fpnext' })}`) });
 
 reg('S-12', { name: 'Profile', module: 'M1 Account', api: 'E-07, E-08, E-06', roles: 'all', frame: 'phone', states: ['default', 'pending', 'verified', 'rejected'],
   render: ({ s }) => {
@@ -105,7 +103,7 @@ reg('S-13', { name: 'Emergency contacts', module: 'M1 Account', api: 'E-09, E-10
 
 reg('S-14', { name: 'Change phone number', module: 'M1 Account', api: 'E-02, E-03', roles: 'all', frame: 'phone', states: ['password', 'otp', 'number in use'],
   render: ({ s }) => back('Change phone number', `${stepper(2, s === 'otp' ? 2 : 1)}
-   ${s === 'otp' ? `<div class="t-bodyl c-2">${t('Enter the test verification code.')}</div><div class="otp" id="otp">${Array.from({ length: 6 }, () => '<input inputmode="numeric" maxlength="1">').join('')}</div><div id="change-phone-otp-dev-code" class="t-cap c-2 center" aria-live="polite"></div><button id="change-phone-resend" class="btn btn-tertiary btn-M" data-act="resendchangeotp" disabled><span>${t('Resend code')}</span> <span id="change-phone-resend-countdown" aria-live="polite"></span></button>`
+   ${s === 'otp' ? `<div class="t-bodyl c-2">${t('Enter the verification code sent to your registered email address.')}</div><div class="otp" id="otp">${Array.from({ length: 6 }, () => '<input inputmode="numeric" maxlength="1">').join('')}</div><button id="change-phone-resend" class="btn btn-tertiary btn-M" data-act="resendchangeotp" disabled><span>${t('Resend code')}</span> <span id="change-phone-resend-countdown" aria-live="polite"></span></button>`
      : `${field({ id: 'pw', label: 'Current password', type: 'password', ph: 'Your password' })}${field({ id: 'np', label: 'New mobile number', pre: '+92', ph: '312 7654321', ltr: true, error: s === 'number in use' ? 'This number is already in use' : '' })}`}
    <div class="grow"></div>${btn(s === 'otp' ? 'Confirm change' : 'Send code', { act: 'cpnext' })}`) });
 

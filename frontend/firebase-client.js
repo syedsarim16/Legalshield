@@ -53,6 +53,24 @@
     return result;
   }
 
+  async function signInWithEmailAndPassword(email, password) {
+    await ready;
+    return sdk.signInWithEmailAndPassword(auth, email, password);
+  }
+
+  async function sendEmailVerificationLink(email, password) {
+    await ready;
+    const result = await sdk.signInWithEmailAndPassword(auth, email, password);
+    try {
+      await sdk.reload(result.user);
+      if (result.user.emailVerified) return false;
+      await sdk.sendEmailVerification(result.user);
+      return true;
+    } finally {
+      await sdk.signOut(auth);
+    }
+  }
+
   async function signOut() {
     await ready;
     await sdk.signOut(auth);
@@ -107,6 +125,8 @@
     currentUser,
     initialAuthState,
     signInWithCustomToken,
+    signInWithEmailAndPassword,
+    sendEmailVerificationLink,
     signOut,
     loadPreferences,
     savePreferences,

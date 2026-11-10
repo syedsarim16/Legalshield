@@ -41,9 +41,11 @@ class Record:
 
 class User(Record):
     __collection__ = "users"
-    __fields__ = ("id", "role", "full_name", "phone", "cnic", "password_hash", "phone_verified",
+    __fields__ = ("id", "role", "full_name", "phone", "email", "cnic", "password_hash", "phone_verified",
+                  "email_verified",
                   "verification_status", "verification_note", "verification_document_key", "created_at")
-    __defaults__ = {"id": new_id, "cnic": None, "phone_verified": False, "verification_status": "not_required",
+    __defaults__ = {"id": new_id, "email": None, "cnic": None, "phone_verified": False, "email_verified": False,
+                    "verification_status": "not_required",
                     "verification_note": None, "verification_document_key": None, "created_at": utcnow}
 
     def to_dict(self):
@@ -82,8 +84,8 @@ class NgoProfile(Record):
 
 class OtpCode(Record):
     __collection__ = "otp_codes"
-    __fields__ = ("id", "phone", "purpose", "user_id", "code_hash", "attempts", "consumed", "created_at", "expires_at")
-    __defaults__ = {"id": new_id, "user_id": None, "attempts": 0, "consumed": False, "created_at": utcnow}
+    __fields__ = ("id", "email", "phone", "purpose", "user_id", "code_hash", "attempts", "consumed", "created_at", "expires_at")
+    __defaults__ = {"id": new_id, "email": None, "phone": None, "user_id": None, "attempts": 0, "consumed": False, "created_at": utcnow}
 
 
 class PasswordResetGrant(Record):

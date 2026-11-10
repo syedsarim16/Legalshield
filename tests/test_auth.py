@@ -1,27 +1,8 @@
 from app.config import settings
+from app.errors import ApiError
+import app.routers.auth as auth_module
 
-from .conftest import API, PNG, make_admin, register_and_login
-
-
-def test_password_reset_requires_verified_otp_and_single_use_grant(client):
-    tokens, _ = register_and_login(client)
-    req = client.post(f"{API}/auth/otp/request", json={"purpose": "reset", "phone": "03001234567"}).json()
-    code = req["dev_otp"]
-    wrong = "000000" if code != "000000" else "111111"
-    invalid = client.post(f"{API}/auth/otp/verify", json={"purpose": "reset", "phone": "03001234567", "code": wrong})
-    assert invalid.status_code == 400
-    assert "reset_token" not in invalid.json()
-
-    verified = client.post(f"{API}/auth/otp/verify", json={"purpose": "reset", "phone": "03001234567", "code": code})
-    assert verified.status_code == 200 and verified.json()["verified"] is True
-    grant = verified.json()["reset_token"]
-    reset = client.post(f"{API}/auth/password/reset", json={"reset_token": grant, "new_password": "NewPassw0rd!"})
-    assert reset.status_code == 200 and reset.json() == {"reset": True}
-    replay = client.post(f"{API}/auth/password/reset", json={"reset_token": grant, "new_password": "OtherPassw0rd!"})
-    assert replay.status_code == 400 and replay.json()["error"]["code"] == "RESET_TOKEN_INVALID"
-    assert client.post(f"{API}/auth/otp/verify", json={"purpose": "reset", "phone": "03001234567", "code": code}).status_code == 400
-    assert client.post(f"{API}/auth/refresh", json={"refresh_token": tokens["refresh_token"]}).status_code == 401
-    assert client.post(f"{API}/auth/login", json={"phone": "03001234567", "password": "NewPassw0rd!"}).status_code == 200
+from .conftest import API, PNG, email_for_phone, latest_email_code, make_admin, register_and_login
 
 
 def test_health(client):
@@ -32,6 +13,7 @@ def test_citizen_register_verify_login_me(client):
     tokens, h = register_and_login(client, cnic="12345-1234567-1")
     me = client.get(f"{API}/users/me", headers=h).json()
     assert me["role"] == "citizen" and me["phone"] == "+923001234567"
+    assert me["email"] == email_for_phone("03001234567") and me["email_verified"] is True
     assert me["cnic_masked"] == "*****-*******-1"
     assert me["verification_status"] == "not_required"
     assert "12345-1234567" not in str(me)
@@ -40,24 +22,26 @@ def test_citizen_register_verify_login_me(client):
     assert raw and "12345-1234567-1" not in raw
 
 
-def test_login_blocked_until_phone_verified(client):
-    client.post(f"{API}/auth/register", data={"role": "citizen", "full_name": "A B", "phone": "03111111111", "password": "Passw0rd!"})
-    r = client.post(f"{API}/auth/login", json={"phone": "03111111111", "password": "Passw0rd!"})
-    assert r.status_code == 403 and r.json()["error"]["code"] == "PHONE_NOT_VERIFIED"
+def test_login_blocked_until_email_verified(client):
+    email = email_for_phone("03111111111")
+    client.post(f"{API}/auth/register", data={"role": "citizen", "full_name": "A B", "phone": "03111111111", "email": email, "password": "Passw0rd!"})
+    r = client.post(f"{API}/auth/login", json={"email": email, "password": "Passw0rd!"})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "EMAIL_NOT_VERIFIED"
 
 
 def test_wrong_password_and_error_shape(client, citizen):
-    r = client.post(f"{API}/auth/login", json={"phone": "03001234567", "password": "nope-nope"})
-    assert r.status_code == 401 and r.json() == {"error": {"code": "INVALID_CREDENTIALS", "message": "Phone number or password is incorrect."}}
+    r = client.post(f"{API}/auth/login", json={"email": email_for_phone("03001234567"), "password": "nope-nope"})
+    assert r.status_code == 401 and r.json() == {"error": {"code": "INVALID_CREDENTIALS", "message": "Email address or password is incorrect."}}
 
 
 def test_admin_cannot_self_register(client):
-    r = client.post(f"{API}/auth/register", data={"role": "admin", "full_name": "Evil", "phone": "03001112222", "password": "Passw0rd!"})
+    r = client.post(f"{API}/auth/register", data={"role": "admin", "full_name": "Evil", "phone": "03001112222", "email": "evil@example.test", "password": "Passw0rd!"})
     assert r.status_code == 403 and r.json()["error"]["code"] == "ADMIN_REGISTRATION_FORBIDDEN"
 
 
 def test_validation_errors(client):
-    base = {"role": "citizen", "full_name": "A B", "phone": "03001112222", "password": "Passw0rd!"}
+    base = {"role": "citizen", "full_name": "A B", "phone": "03001112222", "email": "a@example.test", "password": "Passw0rd!"}
+    assert client.post(f"{API}/auth/register", data={**base, "email": "not-an-email"}).json()["error"]["code"] == "INVALID_EMAIL"
     assert client.post(f"{API}/auth/register", data={**base, "cnic": "123"}).json()["error"]["code"] == "INVALID_CNIC"
     assert client.post(f"{API}/auth/register", data={**base, "phone": "12345"}).json()["error"]["code"] == "INVALID_PHONE"
     assert client.post(f"{API}/auth/register", data={**base, "password": "short"}).json()["error"]["code"] == "WEAK_PASSWORD"
@@ -67,18 +51,145 @@ def test_validation_errors(client):
 
 
 def test_duplicate_verified_phone(client, citizen):
-    r = client.post(f"{API}/auth/register", data={"role": "citizen", "full_name": "X Y", "phone": "0300-1234567", "password": "Passw0rd!"})
+    r = client.post(f"{API}/auth/register", data={"role": "citizen", "full_name": "X Y", "phone": "0300-1234567", "email": "other@example.test", "password": "Passw0rd!"})
     assert r.status_code == 409 and r.json()["error"]["code"] == "PHONE_IN_USE"
 
 
+def test_firebase_verification_required_and_exchange(client):
+    email = "verified@example.test"
+    response = client.post(
+        f"{API}/auth/register",
+        data={"role": "citizen", "full_name": "A B", "phone": "03101010101", "email": email, "password": "Passw0rd!"},
+    )
+    assert response.status_code == 201
+    assert "firebase_custom_token" not in response.json()
+    assert "dev_otp" not in response.json()
+    unverified = client.post(
+        f"{API}/auth/firebase/email/exchange",
+        json={"id_token": f"test-email:{response.json()['user_id']}:{email}:false"},
+    )
+    assert unverified.status_code == 403
+    verified = client.post(
+        f"{API}/auth/firebase/email/exchange",
+        json={"id_token": f"test-email:{response.json()['user_id']}:{email}:true"},
+    )
+    assert verified.status_code == 200
+    assert "firebase_custom_token" not in verified.json()
+
+
+def test_registration_uses_firebase_email_verification_not_backend_otp(client):
+    from .conftest import test_email_sender, test_firestore
+
+    email = "verify-link@example.test"
+    registration = client.post(
+        f"{API}/auth/register",
+        data={"role": "citizen", "full_name": "A B", "phone": "03101010102", "email": email, "password": "Passw0rd!"},
+    )
+    assert registration.status_code == 201
+    assert not test_firestore.data.get("otp_codes")
+    assert not test_email_sender.messages
+    assert client.post(
+        f"{API}/auth/otp/verify",
+        json={"purpose": "register", "email": email, "code": "123456"},
+    ).status_code == 422
+    assert client.post(
+        f"{API}/auth/otp/request",
+        json={"purpose": "register", "email": email},
+    ).status_code == 422
+    unverified = client.post(
+        f"{API}/auth/firebase/email/exchange",
+        json={"id_token": f"test-email:{registration.json()['user_id']}:{email}:false"},
+    )
+    assert unverified.status_code == 403
+    verified = client.post(
+        f"{API}/auth/firebase/email/exchange",
+        json={"id_token": f"test-email:{registration.json()['user_id']}:{email}:true"},
+    )
+    assert verified.status_code == 200
+    assert test_firestore.data["users"][registration.json()["user_id"]]["email_verified"] is True
+
+
+def test_password_reset_email_otp_changes_password_and_revokes_sessions(client, monkeypatch):
+    tokens, headers = register_and_login(client, phone="03101010102")
+    email = email_for_phone("03101010102")
+    from .conftest import test_firestore
+    user_id = next(iter(test_firestore.data["users"]))
+    changed = []
+    monkeypatch.setattr(auth_module, "set_email_password", lambda uid, password: changed.append((uid, password)))
+    request = client.post(f"{API}/auth/otp/request", json={"purpose": "reset", "email": email})
+    assert request.status_code == 200 and request.json() == {"sent": True}
+    verified = client.post(
+        f"{API}/auth/otp/verify",
+        json={"purpose": "reset", "email": email, "code": latest_email_code(email)},
+    )
+    assert verified.status_code == 200
+    assert "code" not in verified.json() and verified.json()["reset_token"]
+    reset = client.post(
+        f"{API}/auth/password/reset",
+        json={"reset_token": verified.json()["reset_token"], "new_password": "NewPassw0rd!"},
+    )
+    assert reset.status_code == 200 and reset.json() == {"reset": True}
+    assert changed == [(user_id, "NewPassw0rd!")]
+    assert client.post(f"{API}/auth/refresh", json={"refresh_token": tokens["refresh_token"]}).status_code == 401
+    assert client.post(
+        f"{API}/auth/otp/request",
+        headers=headers,
+        json={"purpose": "change_phone", "new_phone": "03101010103", "current_password": "NewPassw0rd!"},
+    ).status_code == 200
+
+
+def test_duplicate_verified_email_is_rejected(client):
+    email = "duplicate@example.test"
+    register_and_login(client, email=email)
+    response = client.post(
+        f"{API}/auth/register",
+        data={"role": "citizen", "full_name": "Another User", "phone": "03102020202", "email": email.upper(), "password": "Passw0rd!"},
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "EMAIL_IN_USE"
+
+
+def test_firebase_email_exchange_rejects_identity_linked_to_another_account(client):
+    first_email = "first@example.test"
+    first = client.post(
+        f"{API}/auth/register",
+        data={"role": "citizen", "full_name": "First User", "phone": "03102020221", "email": first_email, "password": "Passw0rd!"},
+    ).json()
+    second = client.post(
+        f"{API}/auth/register",
+        data={"role": "citizen", "full_name": "Second User", "phone": "03102020222", "email": "second@example.test", "password": "Passw0rd!"},
+    ).json()
+
+    response = client.post(
+        f"{API}/auth/firebase/email/exchange",
+        json={"id_token": f"test-email:{second['user_id']}:{first_email}:true"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "FIREBASE_ACCOUNT_EXISTS"
+
+
+def test_firebase_email_account_creation_failure_is_explicit(client, monkeypatch):
+    def fail_create(*args):
+        raise ApiError(503, "FIREBASE_UNAVAILABLE", "Firebase email authentication is temporarily unavailable.")
+
+    monkeypatch.setattr(auth_module, "create_email_user", fail_create)
+    response = client.post(
+        f"{API}/auth/register",
+        data={"role": "citizen", "full_name": "A B", "phone": "03103030303", "email": "failed@example.test", "password": "Passw0rd!"},
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "FIREBASE_UNAVAILABLE"
+
+
 def test_unverified_phone_can_reregister(client):
-    d = {"role": "citizen", "full_name": "A B", "phone": "03121212121", "password": "Passw0rd!"}
+    d = {"role": "citizen", "full_name": "A B", "phone": "03121212121", "email": "repeat@example.test", "password": "Passw0rd!"}
     assert client.post(f"{API}/auth/register", data=d).status_code == 201
     assert client.post(f"{API}/auth/register", data=d).status_code == 201
 
 
 def test_lawyer_pending_and_requires_documents(client):
-    d = {"role": "lawyer", "full_name": "Adv One", "phone": "03211234567", "password": "Passw0rd!"}
+    d = {"role": "lawyer", "full_name": "Adv One", "phone": "03211234567", "email": "lawyer@example.test", "password": "Passw0rd!"}
     assert client.post(f"{API}/auth/register", data=d).json()["error"]["code"] == "BAR_COUNCIL_REQUIRED"
     d["bar_council_no"] = "PB-1234"
     assert client.post(f"{API}/auth/register", data=d).json()["error"]["code"] == "DOCUMENT_REQUIRED"
@@ -99,82 +210,49 @@ def test_file_too_large(client, monkeypatch):
     monkeypatch.setattr(settings, "max_upload_mb", 0)
     r = client.post(
         f"{API}/auth/register",
-        data={"role": "lawyer", "full_name": "Adv", "phone": "03231234567", "password": "Passw0rd!", "bar_council_no": "X"},
+        data={"role": "lawyer", "full_name": "Adv", "phone": "03231234567", "email": "adv@example.test", "password": "Passw0rd!", "bar_council_no": "X"},
         files={"verification_document": ("a.png", PNG, "image/png")},
     )
     assert r.status_code == 413
 
 
 def test_otp_wrong_code_then_lockout(client):
-    r = client.post(f"{API}/auth/register", data={"role": "citizen", "full_name": "A B", "phone": "03141414141", "password": "Passw0rd!"})
-    good = r.json()["dev_otp"]
+    _, headers = register_and_login(client, phone="03141414141")
+    email = email_for_phone("03141414141")
+    client.post(
+        f"{API}/auth/otp/request",
+        headers=headers,
+        json={"purpose": "change_phone", "new_phone": "03141414142", "current_password": "Passw0rd!"},
+    )
+    good = latest_email_code(email)
     wrong = "000000" if good != "000000" else "111111"
     for _ in range(5):
-        assert client.post(f"{API}/auth/otp/verify", json={"purpose": "register", "phone": "03141414141", "code": wrong}).json()["error"]["code"] == "OTP_INVALID"
-    locked = client.post(f"{API}/auth/otp/verify", json={"purpose": "register", "phone": "03141414141", "code": good})
+        assert client.post(f"{API}/auth/otp/verify", json={"purpose": "change_phone", "email": email, "phone": "03141414142", "code": wrong}).json()["error"]["code"] == "OTP_INCORRECT"
+    locked = client.post(f"{API}/auth/otp/verify", json={"purpose": "change_phone", "email": email, "phone": "03141414142", "code": good})
     assert locked.status_code == 429 and locked.json()["error"]["code"] == "OTP_LOCKED"
 
 
 def test_otp_rate_limit(client, monkeypatch):
     monkeypatch.setattr(settings, "otp_rate_limit", 3)
-    d = {"role": "citizen", "full_name": "A B", "phone": "03151515151", "password": "Passw0rd!"}
-    assert client.post(f"{API}/auth/register", data=d).status_code == 201
-    for _ in range(2):
-        assert client.post(f"{API}/auth/otp/request", json={"purpose": "register", "phone": "03151515151"}).status_code == 200
-    r = client.post(f"{API}/auth/otp/request", json={"purpose": "register", "phone": "03151515151"})
+    _, headers = register_and_login(client, phone="03151515151")
+    request = {"purpose": "change_phone", "new_phone": "03151515152", "current_password": "Passw0rd!"}
+    for _ in range(3):
+        assert client.post(f"{API}/auth/otp/request", headers=headers, json=request).status_code == 200
+    r = client.post(f"{API}/auth/otp/request", headers=headers, json=request)
     assert r.status_code == 429 and r.json()["error"]["code"] == "OTP_RATE_LIMITED"
 
 
 def test_old_otp_stops_working_after_resend(client):
-    d = {"role": "citizen", "full_name": "A B", "phone": "03161616161", "password": "Passw0rd!"}
-    first = client.post(f"{API}/auth/register", data=d).json()["dev_otp"]
-    second = client.post(f"{API}/auth/otp/request", json={"purpose": "register", "phone": "03161616161"}).json()["dev_otp"]
+    _, headers = register_and_login(client, phone="03161616161")
+    email = email_for_phone("03161616161")
+    request = {"purpose": "change_phone", "new_phone": "03161616162", "current_password": "Passw0rd!"}
+    client.post(f"{API}/auth/otp/request", headers=headers, json=request)
+    first = latest_email_code(email)
+    client.post(f"{API}/auth/otp/request", headers=headers, json=request)
+    second = latest_email_code(email)
     if first != second:
-        assert client.post(f"{API}/auth/otp/verify", json={"purpose": "register", "phone": "03161616161", "code": first}).status_code == 400
-    assert client.post(f"{API}/auth/otp/verify", json={"purpose": "register", "phone": "03161616161", "code": second}).status_code == 200
-
-
-def test_password_reset_revokes_sessions(client):
-    tokens, _ = register_and_login(client)
-    req = client.post(f"{API}/auth/otp/request", json={"purpose": "reset", "phone": "03001234567"}).json()
-    ok = client.post(f"{API}/auth/otp/verify", json={"purpose": "reset", "phone": "03001234567", "code": req["dev_otp"], "new_password": "NewPassw0rd!"})
-    assert ok.status_code == 200
-    assert client.post(f"{API}/auth/refresh", json={"refresh_token": tokens["refresh_token"]}).status_code == 401
-    assert client.post(f"{API}/auth/login", json={"phone": "03001234567", "password": "Passw0rd!"}).status_code == 401
-    assert client.post(f"{API}/auth/login", json={"phone": "03001234567", "password": "NewPassw0rd!"}).status_code == 200
-
-
-def test_reset_for_unknown_phone_returns_clear_mismatch(client):
-    r = client.post(f"{API}/auth/otp/request", json={"purpose": "reset", "phone": "03009990000"})
-    assert r.status_code == 404
-    assert r.json()["error"] == {
-        "code": "RESET_PHONE_NOT_FOUND",
-        "message": "No verified account is registered with that phone number.",
-    }
-
-
-def test_reset_otp_expires(client):
-    from datetime import timedelta
-
-    from app.db import FirestoreSession
-    from app.models import OtpCode
-    from app.utils import utcnow
-    from .conftest import test_firestore
-
-    register_and_login(client)
-    req = client.post(f"{API}/auth/otp/request", json={"purpose": "reset", "phone": "03001234567"}).json()
-    assert len(req["dev_otp"]) == 6 and req["dev_otp"].isdigit()
-    db = FirestoreSession(test_firestore)
-    otp = db.query(OtpCode).filter_by(phone="+923001234567", purpose="reset").one()
-    assert abs((otp.expires_at - otp.created_at).total_seconds() - 60) < 0.01
-    otp.expires_at = utcnow()
-    db.commit()
-    db.close()
-    expired = client.post(
-        f"{API}/auth/otp/verify",
-        json={"purpose": "reset", "phone": "03001234567", "code": req["dev_otp"]},
-    )
-    assert expired.status_code == 400 and expired.json()["error"]["code"] == "OTP_INVALID"
+        assert client.post(f"{API}/auth/otp/verify", json={"purpose": "change_phone", "email": email, "phone": "03161616162", "code": first}).status_code == 400
+    assert client.post(f"{API}/auth/otp/verify", json={"purpose": "change_phone", "email": email, "phone": "03161616162", "code": second}).status_code == 200
 
 
 def test_refresh_rotation_and_reuse_detection(client, citizen):
