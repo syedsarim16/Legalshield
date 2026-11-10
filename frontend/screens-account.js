@@ -60,10 +60,11 @@ reg('S-07', { name: 'Register: lawyer', module: 'M1 Account', api: 'E-01', roles
 reg('S-08', { name: 'Register: NGO monitor', module: 'M1 Account', api: 'E-01', roles: 'N', frame: 'phone', states: ['default', 'errors'],
   render: ({ s }) => regForm(`${field({ id: 'org', label: 'Organisation name', ph: 'Your organisation' })}${field({ id: 'dist', label: 'Districts you cover', select: DISTRICTS, value: 'Islamabad' })}<div class="stack g8"><label class="t-label">${t('Proof of organisation')}</label>${filepick(ST.file_org, 'Upload proof document', 'registration_letter.pdf  |  0.8 MB', 'pickfile').replace('data-act="pickfile"', 'data-act="pickfile" data-v="org"')}</div>`, s, 'NGO monitor account') });
 
-reg('S-09', { name: 'Email verification', module: 'M1 Account', api: 'Firebase email link', roles: 'all', frame: 'phone', states: ['default'],
-  render: () => back('Verify your email', `<div class="t-bodyl c-2">${t('Open the verification link we sent to your inbox. After verifying, return here to continue.')}</div>
+reg('S-09', { name: 'Email verification', module: 'M1 Account', api: 'Email OTP', roles: 'all', frame: 'phone', states: ['default'],
+  render: () => back('Verify your email', `<div class="t-bodyl c-2">${t('Enter the 6-digit verification code we sent to your inbox.')}</div>
    <div class="card"><div class="t-title3">${t('Check your email')}</div><div class="t-body c-2">${esc(ST.pending?.email || '')}</div></div>
-   <button id="register-resend" class="btn btn-tertiary btn-M" style="align-self:center" data-act="resendemail" disabled><span id="register-resend-countdown" aria-live="polite"></span> <span>${t('Resend verification link')}</span></button><div class="grow"></div>${btn('I have verified my email', { act: 'verifyemail' })}`) });
+   <div class="otp" id="otp">${Array.from({ length: 6 }, () => '<input inputmode="numeric" maxlength="1" autocomplete="one-time-code">').join('')}</div>
+   <button id="register-resend" class="btn btn-tertiary btn-M" style="align-self:center" data-act="resendemail" disabled><span id="register-resend-countdown" aria-live="polite"></span> <span>${t('Resend verification code')}</span></button><div class="grow"></div>${btn('Verify code', { act: 'verifyemail' })}`) });
 
 reg('S-10', { name: 'Login', module: 'M1 Account', api: 'E-04', roles: 'all', frame: 'phone', states: ['default', 'error', 'locked'],
   render: ({ s }) => back('Log in', `${s === 'error' ? banner('danger', 'Wrong email or password.') : ''}${s === 'locked' ? banner('warning', 'Too many attempts. Try again in 10 minutes.') : ''}

@@ -69,6 +69,11 @@ def test_firebase_verification_required_and_exchange(client):
         json={"id_token": f"test-email:{response.json()['user_id']}:{email}:false"},
     )
     assert unverified.status_code == 403
+    otp = client.post(
+        f"{API}/auth/otp/verify",
+        json={"purpose": "register", "email": email, "code": latest_email_code(email)},
+    )
+    assert otp.status_code == 200
     verified = client.post(
         f"{API}/auth/firebase/email/exchange",
         json={"id_token": f"test-email:{response.json()['user_id']}:{email}:true"},
@@ -77,36 +82,94 @@ def test_firebase_verification_required_and_exchange(client):
     assert "firebase_custom_token" not in verified.json()
 
 
-def test_registration_uses_firebase_email_verification_not_backend_otp(client):
+def test_registration_uses_email_otp_without_verification_links(client):
     from .conftest import test_email_sender, test_firestore
 
-    email = "verify-link@example.test"
+    email = "verify-otp@example.test"
     registration = client.post(
         f"{API}/auth/register",
         data={"role": "citizen", "full_name": "A B", "phone": "03101010102", "email": email, "password": "Passw0rd!"},
     )
     assert registration.status_code == 201
-    assert not test_firestore.data.get("otp_codes")
-    assert not test_email_sender.messages
-    assert client.post(
-        f"{API}/auth/otp/verify",
-        json={"purpose": "register", "email": email, "code": "123456"},
-    ).status_code == 422
-    assert client.post(
-        f"{API}/auth/otp/request",
-        json={"purpose": "register", "email": email},
-    ).status_code == 422
+    assert test_email_sender.messages[-1][0] == email
+    assert "http" not in test_email_sender.messages[-1][2].lower()
+    assert test_firestore.data["users"][registration.json()["user_id"]]["email_verified"] is False
     unverified = client.post(
         f"{API}/auth/firebase/email/exchange",
         json={"id_token": f"test-email:{registration.json()['user_id']}:{email}:false"},
     )
     assert unverified.status_code == 403
     verified = client.post(
+        f"{API}/auth/otp/verify",
+        json={"purpose": "register", "email": email, "code": latest_email_code(email)},
+    )
+    assert verified.status_code == 200 and verified.json() == {"verified": True}
+    assert test_firestore.data["users"][registration.json()["user_id"]]["email_verified"] is True
+    assert client.post(
+        f"{API}/auth/otp/verify",
+        json={"purpose": "register", "email": email, "code": latest_email_code(email)},
+    ).status_code == 400
+    verified = client.post(
         f"{API}/auth/firebase/email/exchange",
         json={"id_token": f"test-email:{registration.json()['user_id']}:{email}:true"},
     )
     assert verified.status_code == 200
-    assert test_firestore.data["users"][registration.json()["user_id"]]["email_verified"] is True
+
+
+def test_firebase_registration_sends_one_email_otp(client):
+    from .conftest import test_email_sender
+
+    email = "phone-registration@example.test"
+    response = client.post(
+        f"{API}/auth/firebase/register",
+        data={
+            "id_token": "test-phone:firebase-user-1:+923101010105",
+            "role": "citizen",
+            "full_name": "A B",
+            "email": email,
+            "password": "Passw0rd!",
+        },
+    )
+    assert response.status_code == 201
+    assert len(test_email_sender.messages) == 1
+    assert test_email_sender.messages[0][0] == email
+    assert client.post(
+        f"{API}/auth/otp/verify",
+        json={"purpose": "register", "email": email, "code": latest_email_code(email)},
+    ).status_code == 200
+
+
+def test_registration_otp_resend_has_server_side_cooldown(client):
+    email = "cooldown@example.test"
+    registration = client.post(
+        f"{API}/auth/register",
+        data={"role": "citizen", "full_name": "A B", "phone": "03101010103", "email": email, "password": "Passw0rd!"},
+    )
+    assert registration.status_code == 201
+    response = client.post(f"{API}/auth/otp/request", json={"purpose": "register", "email": email})
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "OTP_COOLDOWN"
+
+
+def test_registration_otp_is_hashed_and_expires(client, monkeypatch):
+    from .conftest import test_firestore
+
+    monkeypatch.setattr(settings, "otp_minutes", 0)
+    email = "expired@example.test"
+    registration = client.post(
+        f"{API}/auth/register",
+        data={"role": "citizen", "full_name": "A B", "phone": "03101010104", "email": email, "password": "Passw0rd!"},
+    )
+    assert registration.status_code == 201
+    code = latest_email_code(email)
+    otp = next(iter(test_firestore.data["otp_codes"].values()))
+    assert otp["code_hash"] != code
+    response = client.post(
+        f"{API}/auth/otp/verify",
+        json={"purpose": "register", "email": email, "code": code},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "OTP_EXPIRED"
 
 
 def test_password_reset_email_otp_changes_password_and_revokes_sessions(client, monkeypatch):
@@ -159,6 +222,11 @@ def test_firebase_email_exchange_rejects_identity_linked_to_another_account(clie
         f"{API}/auth/register",
         data={"role": "citizen", "full_name": "Second User", "phone": "03102020222", "email": "second@example.test", "password": "Passw0rd!"},
     ).json()
+    for account, email in ((first, first_email), (second, "second@example.test")):
+        assert client.post(
+            f"{API}/auth/otp/verify",
+            json={"purpose": "register", "email": email, "code": latest_email_code(email)},
+        ).status_code == 200
 
     response = client.post(
         f"{API}/auth/firebase/email/exchange",
@@ -233,7 +301,7 @@ def test_otp_wrong_code_then_lockout(client):
 
 
 def test_otp_rate_limit(client, monkeypatch):
-    monkeypatch.setattr(settings, "otp_rate_limit", 3)
+    monkeypatch.setattr(settings, "otp_rate_limit", 4)
     _, headers = register_and_login(client, phone="03151515151")
     request = {"purpose": "change_phone", "new_phone": "03151515152", "current_password": "Passw0rd!"}
     for _ in range(3):

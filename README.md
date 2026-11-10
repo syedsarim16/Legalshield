@@ -23,9 +23,9 @@ FIREBASE_SERVICE_ACCOUNT_JSON=<service-account-json-or-base64-json>
 
 or `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service-account file outside the repository. Never place service-account credentials in frontend files or commit them. Set `FIREBASE_STORAGE_BUCKET` if the bucket is not specified in the Firebase project configuration. Enable Firestore and Storage in Firebase.
 
-Enable the **Email/Password** provider in Firebase Console under **Authentication → Sign-in method**. Configure the **Email address verification** template under **Authentication → Templates**, and add the app's domain under **Authorized domains**. The app uses Firebase Authentication for password sign-in and account identities. Registration verification links are sent by Firebase Authentication using that template (not through the backend SMTP server). Password recovery and phone-number changes use backend-generated six-digit codes delivered through SMTP.
+Enable the **Email/Password** provider in Firebase Console under **Authentication → Sign-in method**, and add the app's domain under **Authorized domains**. The app uses Firebase Authentication for password sign-in and account identities. Registration, password recovery, and phone-number changes use backend-generated six-digit email codes delivered through the configured SMTP server.
 
-Add your SMTP provider's settings to the backend `.env` file for password recovery and phone-number changes. The application uses standard authenticated SMTP and supports STARTTLS or implicit TLS:
+Add your SMTP provider's settings to the backend `.env` file for registration, password recovery, and phone-number changes. The application uses standard authenticated SMTP and supports STARTTLS or implicit TLS:
 
 ```dotenv
 EMAIL_SMTP_HOST=<provider-smtp-host>
@@ -62,7 +62,7 @@ The command reports counts only, not record contents. If existing CNIC values we
 
 ## Authentication and development
 
-- Registration requires an email address and is blocked from account access until the Firebase email verification link is used. Users sign in with Firebase email/password. The Firebase identity-exchange endpoint accepts verified email identities and maps them to the matching registered account. Protected API calls use Firebase ID tokens. The backend tolerates up to five seconds of clock skew when verifying ID tokens.
+- Registration requires an email address and is blocked from account access until the user enters the emailed six-digit OTP. Codes expire, are stored hashed, can only be used once, and can be resent after the 60-second cooldown. Users sign in with Firebase email/password after OTP verification. The Firebase identity-exchange endpoint maps verified identities to the matching registered account. Protected API calls use Firebase ID tokens. The backend tolerates up to five seconds of clock skew when verifying ID tokens.
 - Password recovery and phone-number changes use six-digit email codes with a five-minute validity period by default. The resend control is disabled for 60 seconds, and a successful resend invalidates the previous code. Password recovery requires OTP verification before allowing a new password.
 - `DATA_ENCRYPTION_KEY` should be a stable secret in production; it protects CNIC values in Firestore.
 - `JWT_SECRET` is still used for application refresh-token hashing/signing internals. Set a strong secret in production.

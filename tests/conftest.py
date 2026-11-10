@@ -205,6 +205,9 @@ def client(monkeypatch):
             }
         if value.startswith("test-uid:"):
             return {"uid": value.removeprefix("test-uid:"), "email_verified": True}
+        if value.startswith("test-phone:"):
+            _, uid, phone = value.split(":", 2)
+            return {"uid": uid, "phone_number": phone}
         from app.errors import ApiError
         raise ApiError(401, "FIREBASE_TOKEN_INVALID", "Firebase sign-in could not be verified.")
 
@@ -212,6 +215,7 @@ def client(monkeypatch):
     monkeypatch.setattr(auth_module, "verify_id_token", verify_token)
     monkeypatch.setattr(tokens_module, "create_custom_token", lambda uid: f"test-uid:{uid}")
     monkeypatch.setattr(auth_module, "create_email_user", lambda *args: None)
+    monkeypatch.setattr(auth_module, "set_email_verified", lambda *args: None)
     monkeypatch.setattr(auth_module, "set_email_password", lambda *args: None)
     monkeypatch.setattr(auth_module, "delete_auth_user", lambda *args: None)
     monkeypatch.setattr(auth_module, "upload_document", lambda *args: True)
@@ -235,6 +239,11 @@ def register_and_login(client, role="citizen", phone="03001234567", password="Pa
         files = {"verification_document": ("licence.png", PNG, "image/png")}
     r = client.post(f"{API}/auth/register", data=data, files=files)
     assert r.status_code == 201, r.text
+    verified = client.post(
+        f"{API}/auth/otp/verify",
+        json={"purpose": "register", "email": email, "code": latest_email_code(email)},
+    )
+    assert verified.status_code == 200, verified.text
     v = client.post(
         f"{API}/auth/firebase/email/exchange",
         json={"id_token": f"test-email:{r.json()['user_id']}:{email}:true"},

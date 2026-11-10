@@ -15,6 +15,7 @@ from ..firebase import (
     delete_auth_user,
     delete_document,
     revoke_firebase_user,
+    set_email_verified,
     set_email_password,
     verify_id_token,
     upload_document,
@@ -133,6 +134,7 @@ def register(
         if doc_key:
             delete_document(doc_key)
         raise
+    issue_otp(db, email_n, "register", user.id)
     return {
         "user_id": user.id,
         "role": user.role,
@@ -186,7 +188,7 @@ class FirebaseEmailExchange(FirebaseExchange):
 def firebase_email_exchange(body: FirebaseEmailExchange, db=Depends(get_db)):
     claims = verify_id_token(body.id_token)
     if not claims.get("email_verified") or not claims.get("email"):
-        raise ApiError(403, "EMAIL_NOT_VERIFIED", "Verify your email address before signing in.")
+        raise ApiError(403, "EMAIL_NOT_VERIFIED", "Verify your email address with the code we sent before signing in.")
     email = normalize_email(str(claims["email"]))
     uid = str(claims.get("uid") or claims.get("sub") or "").strip()
     if not uid:
@@ -194,6 +196,8 @@ def firebase_email_exchange(body: FirebaseEmailExchange, db=Depends(get_db)):
     user = db.scalar(select(User).where(User.email == email))
     if user is None:
         raise ApiError(404, "ACCOUNT_NOT_FOUND", "Create a LegalShield account first.")
+    if not user.email_verified:
+        raise ApiError(403, "EMAIL_NOT_VERIFIED", "Verify your email address with the code we sent before signing in.")
     identity = db.get(FirebaseIdentity, uid)
     if identity is not None and identity.user_id != user.id:
         raise ApiError(409, "FIREBASE_ACCOUNT_EXISTS", "This Firebase account is linked to another LegalShield account.")
@@ -208,7 +212,6 @@ def firebase_email_exchange(body: FirebaseEmailExchange, db=Depends(get_db)):
     if body.password and not verify_password(body.password, user.password_hash):
         user.password_hash = hash_password(body.password)
         db.execute(update(RefreshToken).where(RefreshToken.user_id == user.id).values(revoked=True))
-    user.email_verified = True
     db.commit()
     session = issue_token_pair(db, user, include_firebase_custom_token=False)
     return {**session, "role": user.role, "verification_status": user.verification_status}
@@ -293,6 +296,7 @@ def firebase_register(
         if doc_key:
             delete_document(doc_key)
         raise
+    issue_otp(db, email_n, "register", user.id)
     return {
         "user_id": user.id,
         "role": user.role,
@@ -303,7 +307,7 @@ def firebase_register(
 
 
 class OtpRequest(BaseModel):
-    purpose: Literal["reset", "change_phone"]
+    purpose: Literal["register", "reset", "change_phone"]
     email: Optional[str] = None
     new_phone: Optional[str] = None
     current_password: Optional[str] = None
@@ -331,6 +335,20 @@ def otp_request(body: OtpRequest, db=Depends(get_db), me: User | None = Depends(
         raise ApiError(422, "VALIDATION_ERROR", "email is required.")
     email = normalize_email(body.email)
     user = db.scalar(select(User).where(User.email == email))
+    if body.purpose == "register":
+        if user is None:
+            raise ApiError(404, "ACCOUNT_NOT_FOUND", "No account is registered with that email address.")
+        if user.email_verified:
+            raise ApiError(409, "EMAIL_ALREADY_VERIFIED", "This email address is already verified.")
+        latest = db.scalar(
+            select(OtpCode)
+            .where(OtpCode.email == email, OtpCode.purpose == "register")
+            .order_by(OtpCode.created_at.desc(), OtpCode.id.desc())
+        )
+        if latest is not None and latest.created_at > utcnow() - timedelta(seconds=60):
+            raise ApiError(429, "OTP_COOLDOWN", "Please wait one minute before requesting another code.")
+        issue_otp(db, email, body.purpose, user.id)
+        return {"sent": True}
     if user is None:
         raise ApiError(404, "ACCOUNT_NOT_FOUND", "No account is registered with that email address.")
     if not user.email_verified:
@@ -346,7 +364,7 @@ def otp_request(body: OtpRequest, db=Depends(get_db), me: User | None = Depends(
 
 
 class OtpVerify(BaseModel):
-    purpose: Literal["reset", "change_phone"]
+    purpose: Literal["register", "reset", "change_phone"]
     email: Optional[str] = None
     phone: Optional[str] = None  # for change_phone this is the NEW phone number
     code: str = Field(pattern=r"^\d{6}$")
@@ -362,6 +380,13 @@ def otp_verify(body: OtpVerify, db=Depends(get_db)):
     user = db.get(User, row.user_id)
     if user is None or user.email != email:
         raise ApiError(400, "OTP_INVALID", "Code is invalid or has expired.")
+    if body.purpose == "register":
+        if row.user_id != user.id or user.email_verified:
+            raise ApiError(400, "OTP_INVALID", "Code is invalid or has expired.")
+        set_email_verified(user.id)
+        user.email_verified = True
+        db.commit()
+        return {"verified": True}
     if body.purpose == "reset":
         if not user.email_verified or row.user_id != user.id:
             raise ApiError(400, "OTP_INVALID", "Code is invalid or has expired.")

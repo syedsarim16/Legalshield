@@ -109,7 +109,7 @@
     await result.user.reload();
     if (!result.user.emailVerified) {
       await fb().signOut();
-      throw new ApiErr(403, 'EMAIL_NOT_VERIFIED', 'Verify your email address using the link we sent before signing in.');
+      throw new ApiErr(403, 'EMAIL_NOT_VERIFIED', 'Verify your email address with the code we sent before signing in.');
     }
     const idToken = await fb().token(true);
     if (!idToken) throw new ApiErr(401, 'UNAUTHENTICATED', 'Firebase sign-in could not be established.');
@@ -163,8 +163,6 @@
     const messages = {
       'auth/invalid-custom-token': 'Firebase could not establish your account session. Check the Firebase project configuration.',
       'auth/operation-not-allowed': 'Email/password sign-in is disabled. Enable the Email/Password provider in Firebase Authentication.',
-      'auth/unauthorized-continue-uri': 'This app domain is not authorized for Firebase email action links. Add it in Firebase Authentication settings.',
-      'auth/invalid-continue-uri': 'Firebase rejected the email action link destination. Check the authorized domains and app URL.',
       'auth/email-already-in-use': 'This email address is already registered.',
     };
     return messages[code] || (error?.message ? `Firebase sign-in error: ${error.message}` : 'Something went wrong. Please try again.');
@@ -258,18 +256,20 @@
     if (role === 'ngo_monitor') { fd.append('organisation_name', val('org')); fd.append('districts', val('dist')); if (ST.files.org) fd.append('verification_document', ST.files.org); }
     const email = val('email'), password = val('pw');
     await api('POST', '/auth/register', fd, { auth: false, form: true });
-    await fb().sendEmailVerificationLink(email, password);
     ST.pending = { email, password, role, resendAt: Date.now() + RESEND_INTERVAL_MS };
     ST.files = {}; ST.form = {};
     HIST.push(location.hash); go('S-09');
     render(true);
-    toast('Verification link sent to your email.');
+    toast('Verification code sent to your email.');
   }, el);
 
   /* ---------------- M1: Email verification ---------------- */
   ACTS.verifyemail = el => guard(async () => {
     const p = ST.pending; if (!p) { go('S-10'); return; }
     const { email, password } = p;
+    const code = otpValue();
+    if (!/^\d{6}$/.test(code)) { showErr('Enter the 6-digit code sent to your email.'); return; }
+    await api('POST', '/auth/otp/verify', { purpose: 'register', email, code }, { auth: false });
     await signIn(email, password);
     ST.pending = null;
     if (ST.role !== 'citizen') setTimeout(() => toast('Email verified. Your account is pending admin verification.'), 200);
@@ -279,13 +279,13 @@
   s09.mount = ((orig) => ctx => {
     if (orig) orig(ctx);
     if (ST.pending) startResendCountdown('register-resend', 'register-resend-countdown', ST.pending.resendAt || Date.now());
+    wireOtpInputs();
   })(s09.mount);
   ACTS.resendemail = el => guard(async () => {
     const p = ST.pending; if (!p) return;
     if (Date.now() < p.resendAt) return;
-    const sent = await fb().sendEmailVerificationLink(p.email, p.password);
-    if (!sent) { await signIn(p.email, p.password); return; }
-    p.resendAt = Date.now() + RESEND_INTERVAL_MS; render(true); toast('New verification link sent.');
+    await api('POST', '/auth/otp/request', { purpose: 'register', email: p.email }, { auth: false });
+    p.resendAt = Date.now() + RESEND_INTERVAL_MS; render(true); toast('New verification code sent.');
   }, el);
 
   /* ---------------- M1: login ---------------- */
@@ -295,11 +295,15 @@
     try { await signIn(email, password); }
     catch (e) {
       if (e.code === 'EMAIL_NOT_VERIFIED') {
-        ST.pending = { email, password, resendAt: Date.now() }; HIST.push(location.hash); go('S-09');
-        await fb().sendEmailVerificationLink(email, password);
-        ST.pending.resendAt = Date.now() + RESEND_INTERVAL_MS;
+        const pending = { email, password, resendAt: Date.now() + RESEND_INTERVAL_MS };
+        try {
+          await api('POST', '/auth/otp/request', { purpose: 'register', email }, { auth: false });
+        } catch (requestError) {
+          if (requestError.code !== 'OTP_COOLDOWN') throw requestError;
+        }
+        ST.pending = pending; HIST.push(location.hash); go('S-09');
         render(true);
-        toast('Verification link sent to your email.');
+        toast('Verification code sent to your email.');
         return;
       }
       throw e;
