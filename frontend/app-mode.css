@@ -1,0 +1,16 @@
+/* Real-app mode: hides prototype chrome. Add ?proto=1 to the URL to bring it back. */
+body.appmode .side,body.appmode .toolbar{display:none}
+body.appmode .app{display:block;height:100dvh}
+body.appmode .main{height:100dvh}
+body.appmode .stage{padding:16px;align-items:center}
+.demo-ribbon{background:#FFF4D6;color:#7A5200;font-size:12px;line-height:16px;padding:6px 12px;text-align:center;border-bottom:1px solid #F0D99A;position:relative;z-index:6}
+.form-err{margin-bottom:8px}
+@media (max-width:520px){
+  body.appmode .stage{padding:0;display:block;background:var(--bg,#fff)}
+  body.appmode .phone{width:100vw;height:100dvh;border-radius:0;padding:0;box-shadow:none;background:none}
+  body.appmode .phone::before,body.appmode .phone::after{display:none}
+  body.appmode .phone .ph-wrap{border-radius:0}
+  body.appmode .ph-status{display:none}
+  body.appmode .ph-in{padding-top:0}
+  body.appmode .homebar{display:none}
+}

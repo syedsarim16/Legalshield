@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LegalShield</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Arabic:wght@400;500;600;700&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="app-mode.css">
+</head>
+<body class="appmode">
+<div class="app">
+  <aside class="side">
+    <h1><span style="width:22px;height:26px;background:#17677A;border-radius:4px 4px 12px 12px;display:inline-block"></span> LegalShield</h1>
+    <div class="sub">Clickable prototype. 53 screens + 2 web pages. Built from DESIGN_SYSTEM.md and design-tokens.json.</div>
+    <input class="find" id="find" placeholder="Find a screen, e.g. SOS or S-24" aria-label="Find a screen">
+    <div id="sidelist"></div>
+  </aside>
+  <section class="main">
+    <div class="toolbar">
+      <label>Role <select id="role"><option value="citizen">Citizen</option><option value="lawyer">Lawyer</option><option value="ngo">NGO monitor</option><option value="admin">Admin</option></select></label>
+      <label>Language <select id="lang"><option value="en">English</option><option value="rn">Roman Urdu</option><option value="ur">اردو (RTL)</option></select></label>
+      <label>Theme <select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label>
+      <span id="states" class="row" style="gap:6px"></span>
+      <button class="pill" id="reset">Reset demo</button>
+      <span class="meta" id="meta"></span>
+    </div>
+    <div class="stage" id="stage"></div>
+  </section>
+</div>
+<script src="i18n.js"></script>
+<script src="components.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+<script src="screens-account.js"></script>
+<script src="screens-core.js"></script>
+<script src="screens-content.js"></script>
+<script src="screens-admin.js"></script>
+<script src="screens-web.js"></script>
+<script src="firebase-client.js"></script>
+<script src="api.js"></script>
+</body>
+</html>

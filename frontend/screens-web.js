@@ -1,0 +1,17 @@
+/* Server-rendered web pages: W-01 (SOS tracking link from SMS), W-02 (evidence share link) */
+const webHead = `<div class="webhead">${ic('shield', 28)} LegalShield</div>`;
+reg('W-01', { name: 'SOS tracking page', module: 'Web pages', api: 'E-20', roles: 'public', frame: 'web', url: 'legalshield.pk/t/8fQ2xKd91Lm', states: ['active', 'ended', 'false alarm', 'link invalid'],
+  render: ({ s }) => `<div class="webp">${webHead}${s === 'link invalid' ? `<div class="stack center g12" style="padding:48px 0"><div class="iconbig">${ic('lock', 48)}</div><div class="t-title2">${t('This link is not valid')}</div><div class="t-body c-2 center">${t('It may have expired or been ended by the sender.')}</div></div>` : `
+   <div class="stack g4"><div class="t-title1">Sample Citizen ${t('is sharing their live location with you')}</div><div class="t-body c-2">${t('Sent by SMS because you are their emergency contact.')}</div></div>
+   <div class="row g8">${s === 'active' ? `<span class="badge b-danger">${ic('alert', 16)}${t('Live')}</span>` : s === 'ended' ? badge('ended') : badge('cancelled')}<span class="t-cap c-2">${s === 'active' ? t('Updated 12 s ago') : t('Stopped')}</span></div>
+   ${mapcard(s === 'active' ? 'Updated 12 s ago' : 'Stopped', s !== 'active')}
+   ${s === 'false alarm' ? banner('info', 'The sender marked this as a false alarm. No action is needed.') : s === 'active' ? banner('warning', 'If you cannot reach them, call the police on 15 or rescue on 1122.') : ''}
+   <div class="row g12"><a class="btn btn-primary btn-L full" href="tel:03001112233">${ic('phone', 20)}${t('Call them')}</a></div>${disc()}`}</div>` });
+reg('W-02', { name: 'Shared evidence page', module: 'Web pages', api: 'E-51', roles: 'public', frame: 'web', url: 'legalshield.pk/e/k7Qm2xP9aLw4', states: ['valid', 'expired or revoked', 'rate limited'],
+  render: ({ s }) => `<div class="webp">${webHead}${s === 'valid' ? `<div class="t-title1">${t('Evidence shared with you')}</div>
+   <div class="card"><div class="row g12"><span class="lead li" style="width:48px;height:48px;min-height:0;padding:0;justify-content:center;background:var(--primary-container);color:var(--on-primary-container)">${ic('video', 28)}</span><div class="grow stack g4"><div class="t-title3">Video 14:32</div><div class="t-cap c-2">182 MB</div></div></div><div class="divider"></div>
+   <div class="t-label">${t('Recorded (server time)')}</div><div class="t-body">28 Sep 2026, 21:14 PKT (16:14 UTC)</div><div class="t-label">${t('Fingerprint (SHA-256)')}</div>${hashblock(HASH)}<div class="t-cap c-2">${t('Link expires in 23 hours')}</div></div>
+   <button class="btn btn-primary btn-L full" data-act="toast" data-v="Download starts">${ic('upload', 20, 'mirror')}${t('Download file')}</button>
+   <div class="disc">${ic('info', 16)}<span>${t('The fingerprint shows the file is unchanged since upload. Whether it is accepted as evidence is for the court.')}</span></div>`
+    : s === 'rate limited' ? `<div class="stack center g12" style="padding:48px 0"><div class="iconbig">${ic('clock', 48)}</div><div class="t-title2">${t('Too many requests')}</div><div class="t-body c-2 center">${t('Please wait a minute and try again.')}</div></div>`
+      : `<div class="stack center g12" style="padding:48px 0"><div class="iconbig">${ic('lock', 48)}</div><div class="t-title2">${t('This link is not valid')}</div><div class="t-body c-2 center">${t('It may have expired or been revoked by the owner.')}</div></div>`}</div>` });

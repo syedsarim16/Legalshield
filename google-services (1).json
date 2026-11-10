@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "767134186399",
+    "project_id": "legalshield-f4990",
+    "storage_bucket": "legalshield-f4990.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:767134186399:android:24036533f5a520d935dbaa",
+        "android_client_info": {
+          "package_name": "com.company.legalshield"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB9e1QkSYs5ylePgOAWv4EnAQnJC9ZOvm8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

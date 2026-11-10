@@ -1,0 +1,13 @@
+.venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+legalshield.db
+storage/
+firebase-service-account*.json
+firebase-admin.json
+service-account*.json
+firebase-adminsdk-*.json
+.pytest_cache/
